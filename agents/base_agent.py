@@ -3,7 +3,7 @@ class Agent:
         self.agent_id = agent_id
 
     def update_state(self, row):
-        pass
+        raise NotImplementedError("Subclass must implement this")
 
     def compute_urgency(self):
-        pass
+        raise NotImplementedError("Subclass must implement this")

@@ -10,9 +10,9 @@
 
 # (TBD — filling in today)
 
-## Current Progress (Ayush's Branch)
+## Current Progress
 - Created the `agents/` directory.
 - Built the `base_agent.py` skeleton.
 - Set up the 4 main agent classes (Solar, Battery, EV, Appliance) inheriting from the base agent.
-- Added `test_agents.py` to verify imports and inheritance are working perfectly.
+- Added `test_agents.py` to verify imports and inheritance are working.
 - *Next up:* Wiring up the urgency math!
