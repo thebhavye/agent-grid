@@ -88,59 +88,75 @@ def _generate_load(rng, minutes):
 # EV trajectory
 # ---------------------------------------------------------------------------
 
+def _snap_to_grid(minute_value):
+    """Round a raw minute-of-day value to the nearest 5-min grid step, so
+    a reported event time (e.g. ev_departure_min) always matches the exact
+    grid point where the plugged/unplugged transition actually happens."""
+    return float(round(minute_value / STEP_MIN) * STEP_MIN)
+
+
 def _generate_ev(rng, minutes):
     """Randomize across a few plausible plug-in/departure scenarios rather
     than one fixed pattern: overnight charger, work-from-home midday
-    charger, or evening-only top-up."""
+    charger, or evening-only top-up.
+
+    Modeled as a list of (start_min, end_min, start_soc, target_soc)
+    plugged-in segments within this single 24h window. The overnight
+    scenario needs TWO segments - the tail of the previous night's charge
+    (00:00 -> early morning departure) and the new evening plug-in
+    (evening -> midnight) - otherwise the reported departure time has no
+    matching plugged-in interval in the data at all.
+    """
     scenario = rng.choice(["overnight", "midday", "evening_topup"])
 
     if scenario == "overnight":
-        plug_in_min = rng.uniform(19 * 60, 21 * 60 + 30)
-        departure_min = rng.uniform(6 * 60 + 30, 8 * 60 + 30)
-        start_soc = rng.uniform(20, 45)
-        target_soc = rng.uniform(85, 100)
+        departure_min = _snap_to_grid(rng.uniform(6 * 60 + 30, 8 * 60 + 30))
+        evening_plug_in_min = _snap_to_grid(rng.uniform(19 * 60, 21 * 60 + 30))
+        segments = [
+            # tail end of previous night's charge, already mostly full
+            (0.0, departure_min, rng.uniform(70, 95), rng.uniform(90, 100)),
+            # plugs back in that evening after the day's driving
+            (evening_plug_in_min, float(MINUTES_PER_DAY), rng.uniform(20, 45), rng.uniform(85, 100)),
+        ]
+        departure_min_reported = departure_min
     elif scenario == "midday":
-        plug_in_min = rng.uniform(9 * 60, 10 * 60 + 30)
-        departure_min = rng.uniform(16 * 60, 17 * 60 + 30)
-        start_soc = rng.uniform(35, 60)
-        target_soc = rng.uniform(80, 95)
+        plug_in_min = _snap_to_grid(rng.uniform(9 * 60, 10 * 60 + 30))
+        departure_min = _snap_to_grid(rng.uniform(16 * 60, 17 * 60 + 30))
+        segments = [(plug_in_min, departure_min, rng.uniform(35, 60), rng.uniform(80, 95))]
+        departure_min_reported = departure_min
     else:  # evening_topup
-        plug_in_min = rng.uniform(17 * 60 + 30, 19 * 60)
-        departure_min = rng.uniform(21 * 60, 22 * 60 + 30)
-        start_soc = rng.uniform(50, 70)
-        target_soc = rng.uniform(75, 90)
+        plug_in_min = _snap_to_grid(rng.uniform(17 * 60 + 30, 19 * 60))
+        departure_min = _snap_to_grid(rng.uniform(21 * 60, 22 * 60 + 30))
+        segments = [(plug_in_min, departure_min, rng.uniform(50, 70), rng.uniform(75, 90))]
+        departure_min_reported = departure_min
 
     plugged_in = np.zeros(N_STEPS, dtype=bool)
-    soc = np.full(N_STEPS, start_soc, dtype=float)
+    soc = np.full(N_STEPS, np.nan)
 
-    if plug_in_min < departure_min:
-        # simple case: plugged-in window doesn't wrap past midnight
-        mask = (minutes >= plug_in_min) & (minutes < departure_min)
-    else:
-        # overnight wrap (plug in late, depart next "day" within this
-        # same 24h grid - clamp departure to end of day if it wraps)
-        mask = minutes >= plug_in_min
-        departure_min = min(departure_min + MINUTES_PER_DAY, minutes[-1] + STEP_MIN)
-
-    plugged_in[mask] = True
-    plugged_idx = np.where(mask)[0]
-
-    if len(plugged_idx) > 0:
-        charge_steps = np.arange(len(plugged_idx))
-        # SOC rises roughly linearly to target while plugged, flat once
-        # target reached; flat (at start_soc) everywhere else (idle/away)
+    for seg_start, seg_end, start_soc, target_soc in segments:
+        mask = (minutes >= seg_start) & (minutes < seg_end)
+        idx = np.where(mask)[0]
+        if len(idx) == 0:
+            continue
+        plugged_in[idx] = True
+        charge_steps = np.arange(len(idx))
         soc_curve = start_soc + (target_soc - start_soc) * np.minimum(
-            charge_steps / max(len(plugged_idx) * 0.8, 1), 1.0
+            charge_steps / max(len(idx) * 0.8, 1), 1.0
         )
-        soc[plugged_idx] = soc_curve
-        # after last plugged step, hold at whatever SOC was reached
-        if plugged_idx[-1] + 1 < N_STEPS:
-            soc[plugged_idx[-1] + 1:] = soc[plugged_idx[-1]]
+        soc[idx] = soc_curve
 
-    soc += rng.normal(0, 0.3, size=N_STEPS)
+    # gaps (idle/away, or before the first segment) hold flat at the
+    # nearest known value - forward-fill from the last charging step,
+    # back-fill anything before the very first segment starts
+    soc = pd.Series(soc).ffill().bfill().to_numpy()
+
+    # measurement noise only while actually charging - flat means flat,
+    # per the documented "flat while idle/away" contract
+    noise = rng.normal(0, 0.3, size=N_STEPS)
+    soc = soc + noise * plugged_in
     soc = np.clip(soc, 0, 100)
 
-    departure_min_reported = int(departure_min % MINUTES_PER_DAY)
+    departure_min_reported = int(round(departure_min_reported)) % MINUTES_PER_DAY
     return soc, plugged_in, departure_min_reported
 
 

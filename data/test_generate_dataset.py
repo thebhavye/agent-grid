@@ -13,7 +13,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from data.generate_dataset import generate_dataset, N_STEPS
+from data.generate_dataset import generate_dataset, N_STEPS, STEP_MIN
 
 REQUIRED_TIMESERIES_COLS = [
     "timestamp", "solar_gen_kw", "battery_soc_pct", "battery_health_pct",
@@ -167,6 +167,40 @@ def main():
     check("household load evening peak exceeds overnight trough",
           evening_window["household_load_kw"].max() >
           overnight_window["household_load_kw"].max())
+
+    # ---- EV idle SOC must be genuinely flat (regression: noise used to be
+    # applied even while unplugged, contradicting the documented contract) --
+    plugged = ts["ev_plugged_in"].to_numpy()
+    soc_vals = ts["ev_soc_pct"].to_numpy()
+    idle_flat = True
+    i = 0
+    while i < len(plugged):
+        if not plugged[i]:
+            j = i
+            while j < len(plugged) and not plugged[j]:
+                j += 1
+            if soc_vals[i:j].max() - soc_vals[i:j].min() > 1e-6:
+                idle_flat = False
+                break
+            i = j
+        else:
+            i += 1
+    check("ev_soc_pct is exactly flat during every idle/unplugged stretch", idle_flat)
+
+    # ---- overnight EV scenario: departure_min must correspond to a real
+    # plugged->unplugged transition in the data (regression: it used to be
+    # a phantom value with no matching interval at all) ----------------------
+    dep = int(ts["ev_departure_min"].iloc[0])
+    if ts["ev_plugged_in"].iloc[0]:
+        # this run landed on the overnight scenario (plugged in at midnight)
+        # find the actual grid index where departure occurs, using real
+        # timestamp minutes rather than floor-dividing dep (dep isn't
+        # necessarily grid-aligned, so floor division can land one bucket early)
+        after_dep_idx = int(np.searchsorted(parsed_minutes.to_numpy(), dep, side="left"))
+        check("overnight scenario: EV is plugged in on the step just before departure_min",
+              after_dep_idx == 0 or bool(ts["ev_plugged_in"].iloc[after_dep_idx - 1]))
+        check("overnight scenario: EV is unplugged on the step at/after departure_min",
+              after_dep_idx >= N_STEPS or not bool(ts["ev_plugged_in"].iloc[after_dep_idx]))
 
     # ---- summary --------------------------------------------------------------
     print()
