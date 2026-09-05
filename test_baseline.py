@@ -17,6 +17,22 @@ def test_zero_demand():
     assert allocate(5.0, demands) == {"battery_1": 0, "ev_1": 0}
 
 
+def test_surplus_capped_at_demand():
+    # Solar exceeds total demand: each agent gets exactly what it asked
+    # for, surplus curtailed, never fabricated as consumption (issue #5).
+    demands = {"fridge": 1.0}
+    result = allocate(5.0, demands)
+
+    assert result == {"fridge": 1.0}
+    assert sum(result.values()) == 1.0
+
+    demands = {"a": 0.2, "b": 0.3}
+    result = allocate(5.0, demands)
+
+    assert result == {"a": 0.2, "b": 0.3}
+    assert sum(result.values()) == 0.5
+
+
 def test_simulation_runs_for_each_timestep():
     dataset = [{"solar_gen_kw": 5.0}, {"solar_gen_kw": 3.0}]
     results = run_simulation(dataset, allocate)
