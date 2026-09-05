@@ -2,7 +2,7 @@
 
 from data.generate_dataset import generate_dataset
 from simulation.baseline_allocator import allocate
-from simulation.run_simulation import run_simulation
+from simulation.run_simulation import _build_agents, run_simulation
 
 EXPECTED_AGENTS = {
     "solar_1",
@@ -42,15 +42,40 @@ def test_allocations_do_not_exceed_available_solar():
     ts = tables["timeseries"]
     results = run_simulation(tables, allocate)
 
+    agents = _build_agents(tables["appliances"])
+    rows = ts.to_dict(orient="records")
+
     for i, allocation in enumerate(results):
         available = float(ts["solar_gen_kw"].iloc[i])
         total = sum(allocation.values())
-        # Baseline allocator splits exactly `available` proportionally;
-        # essentials guarantee non-zero demand, so total == available.
-        # The <= covers the degenerate all-zero-demand case (sum 0).
+        for agent in agents:
+            agent.update_state(rows[i])
+        demand_total = sum(float(agent.get_demand_kw()) for agent in agents)
+        # Capped allocator: total == min(available, demand); surplus solar
+        # is curtailed, never fabricated as consumption (issue #5).
         assert total <= available + 1e-6, f"step {i}: {total} > solar {available}"
-        if total > 1e-9:
-            assert abs(total - available) < 1e-6, f"step {i}: {total} != solar {available}"
+        assert abs(total - min(available, demand_total)) < 1e-6, (
+            f"step {i}: {total} != min(solar {available}, demand {demand_total})"
+        )
+
+
+def test_no_allocation_exceeds_demand():
+    tables = generate_dataset(seed=42)
+    ts = tables["timeseries"]
+    results = run_simulation(tables, allocate)
+
+    agents = _build_agents(tables["appliances"])
+    rows = ts.to_dict(orient="records")
+
+    for i, allocation in enumerate(results):
+        for agent in agents:
+            agent.update_state(rows[i])
+        for agent in agents:
+            demand = float(agent.get_demand_kw())
+            assert allocation[agent.agent_id] <= demand + 1e-9, (
+                f"step {i} {agent.agent_id}: allocated "
+                f"{allocation[agent.agent_id]} > demand {demand}"
+            )
 
 
 def main():
