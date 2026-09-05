@@ -11,7 +11,6 @@ EXPECTED_AGENTS = {
     "appliance_fridge",
     "appliance_lighting",
     "appliance_security_system",
-    "appliance_ev_charger",
     "appliance_dishwasher",
     "appliance_washing_machine",
     "appliance_water_heater",

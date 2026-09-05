@@ -60,6 +60,8 @@ def _build_agents(appliances_df):
         agents = [solar, battery, EVAgent("ev_1", max_charge_kw=float(ev_power))]
         for entry in roster:
             aid = entry.get("appliance_id", "unknown")
+            if aid == "ev_charger":
+                continue  # already handled by EVAgent above; avoid double-counting the same physical charger
             agents.append(
                 ApplianceAgent(
                     agent_id=f"appliance_{aid}",
