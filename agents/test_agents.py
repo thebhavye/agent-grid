@@ -25,8 +25,12 @@ ev_normal = EVAgent("ev_1", max_charge_kw=6.25)
 ev_normal.update_state({"ev_soc_pct": 80.0, "ev_departure_min": 600, "timestamp": "00:00"})
 ev_urgent = EVAgent("ev_2", max_charge_kw=6.25)
 ev_urgent.update_state({"ev_soc_pct": 20.0, "ev_departure_min": 30, "timestamp": "00:00"})
+ev_overnight = EVAgent("ev_3", max_charge_kw=6.25)
+ev_overnight.update_state({"ev_soc_pct": 50.0, "ev_departure_min": 360, "timestamp": "22:00"})
+
 print(f"EV (80% SoC, 10hrs left) Urgency: {ev_normal.compute_urgency():.2f}")
 print(f"EV (20% SoC, 30m left) Urgency: {ev_urgent.compute_urgency():.2f}")
+print(f"EV (50% SoC, 22:00->06:00 Overnight) Urgency: {ev_overnight.compute_urgency():.2f}")
 print("-" * 30)
 
 # 4. APPLIANCE

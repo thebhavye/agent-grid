@@ -54,13 +54,15 @@ class EVAgent(Agent):
         if self.ev_soc_pct is None or not getattr(self, 'ev_plugged_in', False):
             return 0.0
             
-        # <-- Fixed: Guard against missing times to keep the linter happy
         if self.ev_departure_min is None or self._current_min is None:
             return 0.0
             
-        # Wrapped in floats just to be extra safe
         soc_gap = (100.0 - float(self.ev_soc_pct)) / 100.0
-        minutes_left = float(self.ev_departure_min) - float(self._current_min)
+        dep_min = float(self.ev_departure_min)
+        curr_min = float(self._current_min)
+        
+        # Wrapped overnight logic pulled from ApplianceAgent
+        minutes_left = dep_min - curr_min if dep_min >= curr_min else (dep_min + 1440.0) - curr_min
         
         if minutes_left <= 0:
             return 1.0
