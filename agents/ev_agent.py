@@ -14,6 +14,7 @@ class EVAgent(Agent):
         self.ev_soc_pct = None
         self.ev_departure_min = None
         self.ev_plugged_in = None
+        self._current_min = None  # <-- Fixed: Added this so the agent knows time exists
 
     def update_state(self, row):
         # Defaults mirror BatteryAgent: legacy fake rows without EV
@@ -21,9 +22,21 @@ class EVAgent(Agent):
         self.ev_soc_pct = row.get("ev_soc_pct", 50.0)
         self.ev_departure_min = row.get("ev_departure_min", 0)
         self.ev_plugged_in = row.get("ev_plugged_in", True)
+        
         # Normalise numpy bools to plain Python bool.
         if self.ev_plugged_in is not None:
             self.ev_plugged_in = bool(self.ev_plugged_in)
+            
+        # <-- Fixed: Actually grab the time from the row so urgency math works!
+        ts = row.get("timestamp")
+        if isinstance(ts, str) and ":" in ts:
+            try:
+                hh, mm = ts.split(":")
+                self._current_min = int(hh) * 60 + int(mm)
+            except ValueError:
+                self._current_min = 0
+        else:
+            self._current_min = 0
 
     def get_demand_kw(self):
         # Unplugged -> 0 regardless of SOC. Plugged in -> linear
@@ -36,3 +49,21 @@ class EVAgent(Agent):
             return 0.0
         gap = max(0.0, EV_TARGET_SOC_PCT - float(self.ev_soc_pct))
         return self.max_charge_kw * (gap / 100.0)
+
+    def compute_urgency(self):
+        if self.ev_soc_pct is None or not getattr(self, 'ev_plugged_in', False):
+            return 0.0
+            
+        # <-- Fixed: Guard against missing times to keep the linter happy
+        if self.ev_departure_min is None or self._current_min is None:
+            return 0.0
+            
+        # Wrapped in floats just to be extra safe
+        soc_gap = (100.0 - float(self.ev_soc_pct)) / 100.0
+        minutes_left = float(self.ev_departure_min) - float(self._current_min)
+        
+        if minutes_left <= 0:
+            return 1.0
+            
+        time_pressure = max(0.0, 1.0 - (minutes_left / 720.0))
+        return max(0.0, min(1.0, 0.5 * soc_gap + 0.5 * time_pressure))
