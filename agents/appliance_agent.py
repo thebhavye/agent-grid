@@ -59,9 +59,9 @@ class ApplianceAgent(Agent):
         if cur_time is None:
             return True
             
-        start = float(start)
-        end = float(end)
-        cur = float(cur_time)
+        start = float(start) # type: ignore
+        end = float(end) # type: ignore
+        cur = float(cur_time) # type: ignore
         
         if start <= end:
             # Normal window, e.g. dishwasher 1200 -> 1320:
@@ -83,7 +83,7 @@ class ApplianceAgent(Agent):
         if power is None or _is_missing(power):
             power = DEFAULT_APPLIANCE_POWER_KW
             
-        power = max(0.0, float(power))
+        power = max(0.0, float(power)) # type: ignore
         
         if not getattr(self, 'appliance_deferable', False):
             return power
