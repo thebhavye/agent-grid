@@ -12,6 +12,7 @@ Here is the breakdown of the formulas I tweaked from the starting point for the 
 - I also added explicit None checks using the _is_missing() function to prevent Pylance/linter crashes when casting those time variables to floats.
 
 3. ApplianceAgent Window-Closed Case (Open Question)
+- Open question for the team: Should we log these missed windows instead of silently returning 0.0?
 - For the edge case where the appliance window is completely closed or missed, I explicitly set it to return 0.0.
 - Why: If it missed its window, it shouldn't turn on at all, meaning it demands zero power right now.
 - Open question for the team: Should we log these missed windows instead of silently returning 0.0?
