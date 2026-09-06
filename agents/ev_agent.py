@@ -6,10 +6,6 @@ EV_TARGET_SOC_PCT = 100.0
 class EVAgent(Agent):
     def __init__(self, agent_id, max_charge_kw):
         super().__init__(agent_id)
-        # max_charge_kw is required (no default): it must come from the
-        # appliances roster's ev_charger appliance_power_kw via
-        # _build_agents(). A missing argument raises TypeError loudly
-        # instead of silently falling back to a guessed constant.
         self.max_charge_kw = float(max_charge_kw)
         self.ev_soc_pct = None
         self.ev_departure_min = None
@@ -36,10 +32,6 @@ class EVAgent(Agent):
                 self._current_min = None
 
     def get_demand_kw(self):
-        # Unplugged -> 0 regardless of SOC. Plugged in -> linear
-        # charge demand toward 100% (dataset has no per-row target
-        # column, so 100% is the assumed target), scaled by the
-        # roster-sourced ev_charger rating (self.max_charge_kw).
         if not self.ev_plugged_in:
             return 0.0
         if self.ev_soc_pct is None:
@@ -54,7 +46,10 @@ class EVAgent(Agent):
         if self.ev_departure_min is None or self._current_min is None:
             return 0.0
             
-        soc_gap = (100.0 - float(self.ev_soc_pct)) / 100.0
+        soc_gap = max(0.0, EV_TARGET_SOC_PCT - float(self.ev_soc_pct)) / 100.0
+        if soc_gap <= 0.0:
+            return 0.0
+            
         dep_min = float(self.ev_departure_min)
         curr_min = float(self._current_min)
         
@@ -66,4 +61,3 @@ class EVAgent(Agent):
             
         time_pressure = max(0.0, 1.0 - (minutes_left / 720.0))
         return max(0.0, min(1.0, 0.5 * soc_gap + 0.5 * time_pressure))
-    

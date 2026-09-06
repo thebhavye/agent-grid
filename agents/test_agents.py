@@ -35,9 +35,9 @@ if __name__ == "__main__":
     print("-" * 30)
 
     # 4. APPLIANCE
-    app_open = ApplianceAgent("app_1", appliance_deferable=True, appliance_usual_start_min=1200, appliance_usual_end_min=1440)
+    app_open = ApplianceAgent("app_1", appliance_deferable=True, appliance_usual_start_min=1200, appliance_usual_end_min=0)
     app_open.update_state({"timestamp": "20:10"})
-    app_close = ApplianceAgent("app_2", appliance_deferable=True, appliance_usual_start_min=1200, appliance_usual_end_min=1440)
+    app_close = ApplianceAgent("app_2", appliance_deferable=True, appliance_usual_start_min=1200, appliance_usual_end_min=0)
     app_close.update_state({"timestamp": "23:50"})
     print(f"Appliance (Just started) Urgency: {app_open.compute_urgency():.2f}")
     print(f"Appliance (Closing soon) Urgency: {app_close.compute_urgency():.2f}")
