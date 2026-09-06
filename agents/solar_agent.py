@@ -15,6 +15,6 @@ class SolarAgent(Agent):
         # Solar supplies power (run_simulation uses solar_gen_kw as
         # available_power); it never consumes, so demand is always 0.
         return 0.0
+
     def compute_urgency(self):
         return 0.0
-    

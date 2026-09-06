@@ -30,10 +30,10 @@ class BatteryAgent(Agent):
             return 0.0
         gap = max(0.0, 100.0 - float(self.battery_soc_pct))
         return BATTERY_MAX_CHARGE_KW * (gap / 100.0)
+
     def compute_urgency(self):
         if self.battery_soc_pct is None:
             return 0.0
         # Non-linear curve
-        urgency = ((100.0 - self.battery_soc_pct) / 100.0) ** 2
+        urgency = ((100.0 - float(self.battery_soc_pct)) / 100.0) ** 2
         return max(0.0, min(1.0, urgency))
-    

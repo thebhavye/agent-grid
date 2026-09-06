@@ -20,7 +20,7 @@ class EVAgent(Agent):
         # Defaults mirror BatteryAgent: legacy fake rows without EV
         # columns behave as a plugged-in EV at 50% SOC.
         self.ev_soc_pct = row.get("ev_soc_pct", 50.0)
-        self.ev_departure_min = row.get("ev_departure_min", 0)
+        self.ev_departure_min = row.get("ev_departure_min")
         self.ev_plugged_in = row.get("ev_plugged_in", True)
         
         # Normalise numpy bools to plain Python bool.
