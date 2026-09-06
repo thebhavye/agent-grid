@@ -8,7 +8,7 @@ Here is the breakdown of the formulas I tweaked from the starting point for the 
 - Why: A linear curve means a battery at 50% SoC demands a 0.5 urgency score. That feels way too aggressive since half-full is still pretty safe. Squaring the value keeps the urgency super chill while the battery is relatively healthy, but makes it spike hard once it drops to critical levels.
 
 2. ApplianceAgent Time Window Logic
-- To calculate the urgency ramp-up for deferable appliances, I assumed a standard 4-hour (240 min) maximum operating window. The urgency approaches 1.0 as the time left in that 240-minute window shrinks to zero.
+- To calculate the urgency ramp-up for deferrable appliances, I assumed a standard 4-hour (240 min) maximum operating window. The urgency approaches 1.0 as the time left in that 240-minute window shrinks to zero.
 - I also had to add explicit None checks using the _is_missing() function to prevent Pylance/linter crashes when casting those time variables to floats.
 
 3. ApplianceAgent Window-Closed Case (Open Question)

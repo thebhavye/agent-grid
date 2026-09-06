@@ -85,6 +85,7 @@ class ApplianceAgent(Agent):
         end_min = float(end_val)
         curr_min = float(curr_val)
         
-        time_left = end_min - curr_min if end_min >= curr_min else (end_min + 1440) - curr_min
-        urgency = 1.0 - (time_left / 240.0)
+        time_left = end_min - curr_min if end_min >= curr_min else (end_min + 1440.0) - curr_min
+        URGENCY_WINDOW_MIN = 240.0
+        urgency = 1.0 - (time_left / URGENCY_WINDOW_MIN)
         return max(0.0, min(1.0, urgency))

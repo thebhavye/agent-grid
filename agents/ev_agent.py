@@ -14,29 +14,26 @@ class EVAgent(Agent):
         self.ev_soc_pct = None
         self.ev_departure_min = None
         self.ev_plugged_in = None
-        self._current_min = None  # <-- Fixed: Added this so the agent knows time exists
+        self._current_min = None  # minutes from midnight parsed from timestamp
 
     def update_state(self, row):
-        # Defaults mirror BatteryAgent: legacy fake rows without EV
-        # columns behave as a plugged-in EV at 50% SOC.
+        # Defaults: legacy fake rows without EV columns behave as a plugged-in EV at 50% SOC.
+        # Note: urgency additionally requires ev_departure_min and timestamp; missing values yield 0.0 urgency.
         self.ev_soc_pct = row.get("ev_soc_pct", 50.0)
         self.ev_departure_min = row.get("ev_departure_min")
         self.ev_plugged_in = row.get("ev_plugged_in", True)
         
-        # Normalise numpy bools to plain Python bool.
         if self.ev_plugged_in is not None:
             self.ev_plugged_in = bool(self.ev_plugged_in)
             
-        # <-- Fixed: Actually grab the time from the row so urgency math works!
         ts = row.get("timestamp")
-        if isinstance(ts, str) and ":" in ts:
+        self._current_min = None
+        if isinstance(ts, str):
             try:
-                hh, mm = ts.split(":")
+                hh, mm = ts.split(":", 1)
                 self._current_min = int(hh) * 60 + int(mm)
-            except ValueError:
-                self._current_min = 0
-        else:
-            self._current_min = 0
+            except (ValueError, TypeError):
+                self._current_min = None
 
     def get_demand_kw(self):
         # Unplugged -> 0 regardless of SOC. Plugged in -> linear
@@ -69,3 +66,4 @@ class EVAgent(Agent):
             
         time_pressure = max(0.0, 1.0 - (minutes_left / 720.0))
         return max(0.0, min(1.0, 0.5 * soc_gap + 0.5 * time_pressure))
+    
