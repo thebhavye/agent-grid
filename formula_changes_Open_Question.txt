@@ -16,7 +16,7 @@ Here is the breakdown of the formulas I tweaked from the starting point for the 
 - Why: If it missed its window, it shouldn't turn on at all, meaning it demands zero power right now.
 - Open Question: Should we be logging these missed windows instead of just silently returning 0.0?
 
-Open Question :
+Open Question:
 ApplianceAgent Window-Closed Open Question:
 If an appliance's operating window closes, it returns 0.0 urgency because it can't run anyway. 
 Open question for the team: Should we leave this as a silent return, or do we want to add an explicit log entry when an appliance completely misses its window?
