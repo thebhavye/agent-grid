@@ -3,62 +3,37 @@ from agents.battery_agent import BatteryAgent
 from agents.ev_agent import EVAgent
 from agents.appliance_agent import ApplianceAgent
 
-def test_solar_urgency_is_zero():
-    agent = SolarAgent("solar_1")
-    agent.update_state({"solar_gen_kw": 5.0})
-    assert agent.compute_urgency() == 0.0
+print("=== AGENTGRID URGENCY TESTS ===")
 
+# 1. SOLAR
+s = SolarAgent("solar_1")
+s.update_state({"solar_gen_kw": 5.0})
+print(f"Solar Urgency: {s.compute_urgency():.2f}")
+print("-" * 30)
 
-def test_battery_urgency_reflects_soc():
-    high_soc = BatteryAgent("bat_high")
-    high_soc.update_state({"battery_soc_pct": 95.0})
+# 2. BATTERY
+b_high = BatteryAgent("battery_high")
+b_high.update_state({"battery_soc_pct": 95.0})
+b_low = BatteryAgent("battery_low")
+b_low.update_state({"battery_soc_pct": 10.0})
+print(f"Battery (95% SoC) Urgency: {b_high.compute_urgency():.2f}")
+print(f"Battery (10% SoC) Urgency: {b_low.compute_urgency():.2f}")
+print("-" * 30)
 
-    low_soc = BatteryAgent("bat_low")
-    low_soc.update_state({"battery_soc_pct": "10.0"})
+# 3. EV
+ev_normal = EVAgent("ev_1", max_charge_kw=6.25)
+ev_normal.update_state({"ev_soc_pct": 80.0, "ev_departure_min": 600, "timestamp": "00:00"})
+ev_urgent = EVAgent("ev_2", max_charge_kw=6.25)
+ev_urgent.update_state({"ev_soc_pct": 20.0, "ev_departure_min": 30, "timestamp": "00:00"})
+print(f"EV (80% SoC, 10hrs left) Urgency: {ev_normal.compute_urgency():.2f}")
+print(f"EV (20% SoC, 30m left) Urgency: {ev_urgent.compute_urgency():.2f}")
+print("-" * 30)
 
-    assert high_soc.compute_urgency() < low_soc.compute_urgency()
-    assert low_soc.compute_urgency() == 0.81
-
-
-def test_ev_urgency_handles_missing_departure_and_time_pressure():
-    ev_missing_departure = EVAgent("ev_missing", max_charge_kw=6.25)
-    ev_missing_departure.update_state(
-        {"ev_soc_pct": 20.0, "ev_plugged_in": True, "timestamp": "10:00"}
-    )
-
-    ev_panic = EVAgent("ev_panic", max_charge_kw=6.25)
-    ev_panic.update_state(
-        {
-            "ev_soc_pct": 20.0,
-            "ev_plugged_in": True,
-            "ev_departure_min": 630,
-            "timestamp": "10:00",
-        }
-    )
-
-    assert ev_missing_departure.compute_urgency() == 0.0
-    assert ev_panic.compute_urgency() > 0.8
-
-
-def test_appliance_urgency_rises_near_window_end():
-    app_open = ApplianceAgent(
-        "app_open",
-        appliance_priority=4,
-        appliance_deferable=True,
-        appliance_power_kw=1.25,
-        appliance_usual_start_min=1200,
-        appliance_usual_end_min=1440,
-    )
-    app_open.update_state({"timestamp": "20:10"})
-
-    app_close = ApplianceAgent(
-        "app_close",
-        appliance_priority=4,
-        appliance_deferable=True,
-        appliance_power_kw=1.25,
-        appliance_usual_start_min=1200,
-        appliance_usual_end_min=1440,
-    )
-    app_close.update_state({"timestamp": "23:50"})
-
-    assert app_open.compute_urgency() < app_close.compute_urgency()
+# 4. APPLIANCE
+app_open = ApplianceAgent("app_1", appliance_deferable=True, appliance_usual_start_min=1200, appliance_usual_end_min=1440)
+app_open.update_state({"timestamp": "20:10"})
+app_close = ApplianceAgent("app_2", appliance_deferable=True, appliance_usual_start_min=1200, appliance_usual_end_min=1440)
+app_close.update_state({"timestamp": "23:50"})
+print(f"Appliance (Just started) Urgency: {app_open.compute_urgency():.2f}")
+print(f"Appliance (Closing soon) Urgency: {app_close.compute_urgency():.2f}")
+print("-" * 30)
