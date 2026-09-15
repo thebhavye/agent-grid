@@ -36,6 +36,7 @@ class ApplianceAgent(Agent):
         self.appliance_usual_start_min = appliance_usual_start_min
         self.appliance_usual_end_min = appliance_usual_end_min
         self._current_min = None
+        self.missed_windows = []
 
     def update_state(self, row):
         self._current_min = _parse_timestamp_to_min(row.get("timestamp"))
@@ -80,6 +81,10 @@ class ApplianceAgent(Agent):
             return 0.0
             
         if not self._inside_usual_window():
+            self.missed_windows.append({
+                "timestamp": self._current_min,
+                "appliance_id": self.appliance_id,
+            })
             return 0.0
             
         end_min = float(end_val)

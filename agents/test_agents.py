@@ -42,3 +42,13 @@ if __name__ == "__main__":
     print(f"Appliance (Just started) Urgency: {app_open.compute_urgency():.2f}")
     print(f"Appliance (Closing soon) Urgency: {app_close.compute_urgency():.2f}")
     print("-" * 30)
+
+    # 5. MISSED-WINDOW TRACKING (deferable, window closed -> logged in memory)
+    app_missed = ApplianceAgent("app_missed", appliance_id="dishwasher", appliance_deferable=True,
+                                appliance_usual_start_min=1200, appliance_usual_end_min=1320)
+    app_missed.update_state({"timestamp": "12:00"})
+    assert app_missed.compute_urgency() == 0.0
+    assert len(app_missed.missed_windows) == 1
+    assert app_missed.missed_windows[0]["appliance_id"] == "dishwasher"
+    print(f"Missed-window tracking: {app_missed.missed_windows}")
+    print("-" * 30)
