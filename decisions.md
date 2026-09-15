@@ -34,3 +34,27 @@ debug/test visibility only — no printing, no file writes.
 Why: real user-facing explanation of missed windows deferred to Phase 4
 (LLM-generated allocation explanations); this is just enough to inspect
 during testing now.
+
+## Issue #10 — missed_windows is a current-timestep event buffer
+Decision: `ApplianceAgent.missed_windows` is per-timestep/current-step
+state, not cumulative run history.
+Lifecycle:
+- `update_state(row)` begins the new timestep and clears the previous
+  timestep's events whenever the parsed timestep changes (so a repeated
+  `update_state()` for the same timestep does not drop an unread event).
+- `compute_urgency()` may append a missed-window event only when the
+  current timestep is outside the appliance's usual window, and never
+  duplicates the same appliance/timestep twice (guarded by a
+  timestamp + appliance_id check, so repeated calls are safe).
+- The current-step consumer/arbiter reads the event (via
+  `missed_windows` or the `get_missed_windows()` copy accessor) before the
+  next timestep begins; the next `update_state()` then clears it.
+- Buffer holds at most one event per appliance per timestep, so a 288-step
+  run stays bounded (no unbounded growth).
+Why: bid packaging in Phase 2 will call `compute_urgency()` every timestep
+and the arbiter will consume the signal — without dedup + clearing, the
+same event would be recorded multiple times and grow without bound.
+Scope note: `run_simulation` currently does not consume this signal because
+it does not yet call `compute_urgency()` in its allocation loop; this is
+intentional. The contract above is designed so Phase 2 can safely consume
+it once urgency/bid packaging is integrated. Urgency formula unchanged.
