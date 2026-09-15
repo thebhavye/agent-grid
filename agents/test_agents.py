@@ -52,3 +52,34 @@ if __name__ == "__main__":
     assert app_missed.missed_windows[0]["appliance_id"] == "dishwasher"
     print(f"Missed-window tracking: {app_missed.missed_windows}")
     print("-" * 30)
+
+    # 6. BID PACKAGING (Phase 2 prep: demand + urgency in one bid dict)
+    def check_bid(agent):
+        bid = agent.get_bid()
+        assert set(bid.keys()) == {"agent_id", "demand_kw", "urgency"}, bid
+        assert bid["agent_id"] == agent.agent_id
+        assert bid["demand_kw"] == agent.get_demand_kw()
+        assert bid["urgency"] == agent.compute_urgency()
+        return bid
+
+    bid_solar = SolarAgent("solar_bid")
+    bid_solar.update_state({"solar_gen_kw": 5.0})
+    print(f"Solar bid: {check_bid(bid_solar)}")
+
+    bid_battery = BatteryAgent("battery_bid")
+    bid_battery.update_state({"battery_soc_pct": 10.0})
+    assert check_bid(bid_battery)["demand_kw"] > 0.0
+    print(f"Battery bid: {check_bid(bid_battery)}")
+
+    bid_ev = EVAgent("ev_bid", max_charge_kw=6.25)
+    bid_ev.update_state({"ev_soc_pct": 20.0, "ev_departure_min": 30, "timestamp": "00:00"})
+    assert check_bid(bid_ev)["demand_kw"] > 0.0
+    print(f"EV bid: {check_bid(bid_ev)}")
+
+    bid_app = ApplianceAgent("app_bid", appliance_id="dishwasher", appliance_deferable=True,
+                             appliance_power_kw=1.2,
+                             appliance_usual_start_min=1200, appliance_usual_end_min=0)
+    bid_app.update_state({"timestamp": "23:50"})
+    assert check_bid(bid_app)["demand_kw"] > 0.0
+    print(f"Appliance bid: {check_bid(bid_app)}")
+    print("-" * 30)

@@ -58,3 +58,12 @@ Scope note: `run_simulation` currently does not consume this signal because
 it does not yet call `compute_urgency()` in its allocation loop; this is
 intentional. The contract above is designed so Phase 2 can safely consume
 it once urgency/bid packaging is integrated. Urgency formula unchanged.
+
+## Phase 2 prep — Agent bid object (get_bid())
+Decision: the agent-side bid is exactly
+`{"agent_id", "demand_kw", "urgency"}`, packaged generically in
+`Agent.get_bid()` from the existing `get_demand_kw()` /
+`compute_urgency()` with no overrides and no timestamp/context field.
+Why: the bid is per-agent/per-timestep state; timestep ownership stays
+with the caller (which already holds the row), so stamping time inside
+the bid would duplicate caller state and invite skew.
