@@ -2,8 +2,10 @@
 
 - Surplus solar is discarded, not tracked anywhere in allocator output
   (see decisions.md, issue #5).
-- Appliance missed-window tracking is in-memory only (self.missed_windows),
-  not persisted, logged to file, or user-facing.
+- Appliance missed-window tracking is a per-timestep in-memory buffer
+  (self.missed_windows, cleared on update_state, deduplicated per
+  timestep — see decisions.md, issue #10), not persisted, logged to
+  file, or user-facing.
 - EV target SOC is hardcoded to 100% in get_demand_kw() and
   compute_urgency() — no per-row or per-agent target field exists in the
   dataset yet.

@@ -39,7 +39,25 @@ class ApplianceAgent(Agent):
         self.missed_windows = []
 
     def update_state(self, row):
-        self._current_min = _parse_timestamp_to_min(row.get("timestamp"))
+        # New-timestep boundary: missed_windows is a CURRENT-TIMESTEP event
+        # buffer (see Issue #10), not cumulative history. update_state()
+        # clears the previous timestep's events whenever the parsed timestep
+        # changes, so a repeated update_state() for the same timestep does
+        # not drop an event the consumer has not read yet.
+        new_min = _parse_timestamp_to_min(row.get("timestamp"))
+        if new_min != self._current_min:
+            self.missed_windows = []
+        self._current_min = new_min
+
+    def get_missed_windows(self):
+        """Return current-timestep missed-window events (defensive copy).
+
+        Minimal consumer accessor for the Phase 2 arbiter contract: read
+        the current step's events before the next update_state() clears
+        them. Returns a new list of new dicts so callers cannot mutate
+        either the buffer or the buffered event dicts.
+        """
+        return [dict(e) for e in self.missed_windows]
 
     def _inside_usual_window(self):
         start = self.appliance_usual_start_min
@@ -81,10 +99,19 @@ class ApplianceAgent(Agent):
             return 0.0
             
         if not self._inside_usual_window():
-            self.missed_windows.append({
-                "timestamp": self._current_min,
-                "appliance_id": self.appliance_id,
-            })
+            # Current-step event only, deduplicated: repeated
+            # compute_urgency() calls for the same timestep must not append
+            # the same event twice. Buffer holds at most one event per
+            # appliance per timestep and is cleared by update_state().
+            if not any(
+                e.get("timestamp") == self._current_min
+                and e.get("appliance_id") == self.appliance_id
+                for e in self.missed_windows
+            ):
+                self.missed_windows.append({
+                    "timestamp": self._current_min,
+                    "appliance_id": self.appliance_id,
+                })
             return 0.0
             
         end_min = float(end_val)
