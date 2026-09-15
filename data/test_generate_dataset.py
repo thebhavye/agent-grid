@@ -35,6 +35,52 @@ def check(name, condition):
         _failures.append(name)
 
 
+_OVERNIGHT_SCENARIOS = ("overnight", "midday", "evening_topup")
+
+
+def _generate_overnight_tables(seed=1):
+    """Generate a dataset with the overnight EV scenario forced (test-only).
+
+    The generator picks its EV scenario via rng.choice(["overnight",
+    "midday", "evening_topup"]). Patch np.random.default_rng so that exact
+    draw returns "overnight" regardless of seed luck; all other RNG draws
+    (cloud dips, noise, capacities) pass through untouched. Restores the
+    original default_rng before returning, and changes no production code.
+    """
+    real_default_rng = np.random.default_rng
+
+    class _OvernightRngProxy:
+        """Pass-through wrapper forcing only the EV-scenario draw.
+
+        numpy's Generator disallows monkeypatching `choice` on the
+        instance, so wrap it instead: every method delegates to the real
+        RNG except the scenario draw, which returns "overnight".
+        """
+
+        def __init__(self, rng):
+            self._rng = rng
+
+        def choice(self, a, *cargs, **ckwargs):
+            try:
+                if tuple(a) == _OVERNIGHT_SCENARIOS:
+                    return "overnight"
+            except (TypeError, ValueError):
+                pass
+            return self._rng.choice(a, *cargs, **ckwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.__dict__["_rng"], name)
+
+    def _overnight_rng(*args, **kwargs):
+        return _OvernightRngProxy(real_default_rng(*args, **kwargs))
+
+    np.random.default_rng = _overnight_rng
+    try:
+        return generate_dataset(seed=seed)
+    finally:
+        np.random.default_rng = real_default_rng
+
+
 def main():
     # ---- basic shape / return type -------------------------------------
     tables = generate_dataset(seed=42)
@@ -190,17 +236,24 @@ def main():
     # ---- overnight EV scenario: departure_min must correspond to a real
     # plugged->unplugged transition in the data (regression: it used to be
     # a phantom value with no matching interval at all) ----------------------
-    dep = int(ts["ev_departure_min"].iloc[0])
-    if ts["ev_plugged_in"].iloc[0]:
-        # this run landed on the overnight scenario (plugged in at midnight)
-        # find the actual grid index where departure occurs, using real
-        # timestamp minutes rather than floor-dividing dep (dep isn't
-        # necessarily grid-aligned, so floor division can land one bucket early)
-        after_dep_idx = int(np.searchsorted(parsed_minutes.to_numpy(), dep, side="left"))
-        check("overnight scenario: EV is plugged in on the step just before departure_min",
-              after_dep_idx == 0 or bool(ts["ev_plugged_in"].iloc[after_dep_idx - 1]))
-        check("overnight scenario: EV is unplugged on the step at/after departure_min",
-              after_dep_idx >= N_STEPS or not bool(ts["ev_plugged_in"].iloc[after_dep_idx]))
+    # Forced overnight tables (Issue #11): never depend on which scenario
+    # seed=42 happens to produce, otherwise these checks silently skip.
+    overnight_tables = _generate_overnight_tables(seed=1)
+    ots = overnight_tables["timeseries"]
+    check("forced overnight dataset is actually overnight (plugged in at midnight)",
+          bool(ots["ev_plugged_in"].iloc[0]))
+    o_parsed_minutes = ots["timestamp"].apply(
+        lambda s: int(s[:2]) * 60 + int(s[3:5])
+    )
+    o_dep = int(ots["ev_departure_min"].iloc[0])
+    # find the actual grid index where departure occurs, using real
+    # timestamp minutes rather than floor-dividing dep (dep isn't
+    # necessarily grid-aligned, so floor division can land one bucket early)
+    o_after_dep_idx = int(np.searchsorted(o_parsed_minutes.to_numpy(), o_dep, side="left"))
+    check("overnight scenario: EV is plugged in on the step just before departure_min",
+          o_after_dep_idx == 0 or bool(ots["ev_plugged_in"].iloc[o_after_dep_idx - 1]))
+    check("overnight scenario: EV is unplugged on the step at/after departure_min",
+          o_after_dep_idx >= N_STEPS or not bool(ots["ev_plugged_in"].iloc[o_after_dep_idx]))
 
     # ---- summary --------------------------------------------------------------
     print()
