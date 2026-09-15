@@ -1,10 +1,52 @@
-# \# AgentGrid
+# AgentGrid
 
-# 
+Multi-agent simulated smart-home microgrid — LangGraph bidding, PINN battery health, SHAP explainability, edge LLM.
 
-# Multi-agent simulated smart-home microgrid — LangGraph bidding, PINN battery health, SHAP explainability, edge LLM.
+AgentGrid is a simulated smart-home microgrid where autonomous agents (solar, battery, EV, appliances) score their own power urgency and a shared allocator arbitrates limited solar power between them.
 
-# 
+## Roadmap
+
+| # | Phase | Status |
+|---|-------|--------|
+| 1 | Urgency-scoring agents | DONE |
+| 2 | LangGraph multi-agent bidding + arbiter | not started |
+| 3 | 24h synthetic dataset + baseline eval | DONE |
+| 4 | LLM-generated allocation explanations | not started |
+| 5 | PINN for battery SoH/thermal risk | not started |
+| 6 | Edge quantized LLM for fault interpretation | not started |
+| 7 | SHAP explainability | not started |
+
+## Running tests
+
+```bash
+python -m agents.test_agents
+python -m data.test_generate_dataset
+python -m pytest test_baseline.py -v
+python -m pytest test_simulation.py -v
+```
+
+## Generating the dataset
+
+```python
+from data.generate_dataset import generate_dataset
+tables = generate_dataset(seed=42)
+timeseries_df = tables["timeseries"]  # 288 rows, 5-min steps over 24h
+appliances_df = tables["appliances"]  # 8-row appliance roster
+```
+
+Or run `python data/generate_dataset.py` directly for a sanity check + plot
+(solar/load/EV SOC over the day, saved as `sanity_plot.png`).
+
+## Ownership
+
+- `agents/` — Ayush
+- `data/` + integration — Bhavye
+- `simulation/` — Rahul
+
+## Design history
+
+- `decisions.md` — why key choices were made (allocator surplus policy, urgency formulas, missed-window tracking)
+- `known-limitations.md` — honest list of what's hardcoded, unmodeled, or deferred to later phases
 
 ## Dataset Schema
 
@@ -50,8 +92,10 @@ Generator: `data/generate_dataset.py`, entry point `generate_dataset(seed=None) 
 Sanity plot: run `python data/generate_dataset.py` directly → solar/load/EV SOC over the day.
 
 ## Current Progress
-- Created the `agents/` directory.
-- Built the `base_agent.py` skeleton.
-- Set up the 4 main agent classes (Solar, Battery, EV, Appliance) inheriting from the base agent.
-- Added `test_agents.py` to verify imports and inheritance are working.
-- *Next up:* Wiring up the urgency math!
+
+- `agents/` holds the 4 agent classes (Solar, Battery, EV, Appliance) with
+  working `update_state()`, `get_demand_kw()`, and `compute_urgency()`.
+- `data/` generates the 24h synthetic dataset; `simulation/` runs the
+  capped proportional baseline allocator over it.
+- `test_agents.py` exercises the agents; `test_baseline.py` /
+  `test_simulation.py` cover the allocator and end-to-end pipeline.
