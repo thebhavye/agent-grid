@@ -3,6 +3,47 @@ from agents.battery_agent import BatteryAgent
 from agents.ev_agent import EVAgent
 from agents.appliance_agent import ApplianceAgent
 
+
+def _check_bid(agent):
+    """Assert a bid packages the agent's live demand + urgency. Shared by
+    the pytest test below and the manual __main__ smoke path."""
+    bid = agent.get_bid()
+    assert set(bid.keys()) == {"agent_id", "demand_kw", "urgency"}, bid
+    assert bid["agent_id"] == agent.agent_id
+    assert bid["demand_kw"] == agent.get_demand_kw()
+    assert bid["urgency"] == agent.compute_urgency()
+    return bid
+
+
+def _make_bid_agents():
+    """One of each real agent type in realistic state (non-zero demand
+    except solar, which never consumes)."""
+    solar = SolarAgent("solar_bid")
+    solar.update_state({"solar_gen_kw": 5.0})
+
+    battery = BatteryAgent("battery_bid")
+    battery.update_state({"battery_soc_pct": 10.0})
+
+    ev = EVAgent("ev_bid", max_charge_kw=6.25)
+    ev.update_state({"ev_soc_pct": 20.0, "ev_departure_min": 30, "timestamp": "00:00"})
+
+    appliance = ApplianceAgent("app_bid", appliance_id="dishwasher", appliance_deferable=True,
+                               appliance_power_kw=1.2,
+                               appliance_usual_start_min=1200, appliance_usual_end_min=0)
+    appliance.update_state({"timestamp": "23:50"})
+
+    return solar, battery, ev, appliance
+
+
+def test_get_bid_packaging():
+    solar, battery, ev, appliance = _make_bid_agents()
+
+    _check_bid(solar)
+    assert _check_bid(battery)["demand_kw"] > 0.0
+    assert _check_bid(ev)["demand_kw"] > 0.0
+    assert _check_bid(appliance)["demand_kw"] > 0.0
+
+
 if __name__ == "__main__":
     print("=== AGENTGRID URGENCY TESTS ===")
 
@@ -51,4 +92,12 @@ if __name__ == "__main__":
     assert len(app_missed.missed_windows) == 1
     assert app_missed.missed_windows[0]["appliance_id"] == "dishwasher"
     print(f"Missed-window tracking: {app_missed.missed_windows}")
+    print("-" * 30)
+
+    # 6. BID PACKAGING (Phase 2 prep: demand + urgency in one bid dict)
+    bid_solar, bid_battery, bid_ev, bid_app = _make_bid_agents()
+    print(f"Solar bid: {_check_bid(bid_solar)}")
+    print(f"Battery bid: {_check_bid(bid_battery)}")
+    print(f"EV bid: {_check_bid(bid_ev)}")
+    print(f"Appliance bid: {_check_bid(bid_app)}")
     print("-" * 30)
