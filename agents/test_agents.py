@@ -3,6 +3,47 @@ from agents.battery_agent import BatteryAgent
 from agents.ev_agent import EVAgent
 from agents.appliance_agent import ApplianceAgent
 
+
+def _check_bid(agent):
+    """Assert a bid packages the agent's live demand + urgency. Shared by
+    the pytest test below and the manual __main__ smoke path."""
+    bid = agent.get_bid()
+    assert set(bid.keys()) == {"agent_id", "demand_kw", "urgency"}, bid
+    assert bid["agent_id"] == agent.agent_id
+    assert bid["demand_kw"] == agent.get_demand_kw()
+    assert bid["urgency"] == agent.compute_urgency()
+    return bid
+
+
+def _make_bid_agents():
+    """One of each real agent type in realistic state (non-zero demand
+    except solar, which never consumes)."""
+    solar = SolarAgent("solar_bid")
+    solar.update_state({"solar_gen_kw": 5.0})
+
+    battery = BatteryAgent("battery_bid")
+    battery.update_state({"battery_soc_pct": 10.0})
+
+    ev = EVAgent("ev_bid", max_charge_kw=6.25)
+    ev.update_state({"ev_soc_pct": 20.0, "ev_departure_min": 30, "timestamp": "00:00"})
+
+    appliance = ApplianceAgent("app_bid", appliance_id="dishwasher", appliance_deferable=True,
+                               appliance_power_kw=1.2,
+                               appliance_usual_start_min=1200, appliance_usual_end_min=0)
+    appliance.update_state({"timestamp": "23:50"})
+
+    return solar, battery, ev, appliance
+
+
+def test_get_bid_packaging():
+    solar, battery, ev, appliance = _make_bid_agents()
+
+    _check_bid(solar)
+    assert _check_bid(battery)["demand_kw"] > 0.0
+    assert _check_bid(ev)["demand_kw"] > 0.0
+    assert _check_bid(appliance)["demand_kw"] > 0.0
+
+
 if __name__ == "__main__":
     print("=== AGENTGRID URGENCY TESTS ===")
 
@@ -54,32 +95,9 @@ if __name__ == "__main__":
     print("-" * 30)
 
     # 6. BID PACKAGING (Phase 2 prep: demand + urgency in one bid dict)
-    def check_bid(agent):
-        bid = agent.get_bid()
-        assert set(bid.keys()) == {"agent_id", "demand_kw", "urgency"}, bid
-        assert bid["agent_id"] == agent.agent_id
-        assert bid["demand_kw"] == agent.get_demand_kw()
-        assert bid["urgency"] == agent.compute_urgency()
-        return bid
-
-    bid_solar = SolarAgent("solar_bid")
-    bid_solar.update_state({"solar_gen_kw": 5.0})
-    print(f"Solar bid: {check_bid(bid_solar)}")
-
-    bid_battery = BatteryAgent("battery_bid")
-    bid_battery.update_state({"battery_soc_pct": 10.0})
-    assert check_bid(bid_battery)["demand_kw"] > 0.0
-    print(f"Battery bid: {check_bid(bid_battery)}")
-
-    bid_ev = EVAgent("ev_bid", max_charge_kw=6.25)
-    bid_ev.update_state({"ev_soc_pct": 20.0, "ev_departure_min": 30, "timestamp": "00:00"})
-    assert check_bid(bid_ev)["demand_kw"] > 0.0
-    print(f"EV bid: {check_bid(bid_ev)}")
-
-    bid_app = ApplianceAgent("app_bid", appliance_id="dishwasher", appliance_deferable=True,
-                             appliance_power_kw=1.2,
-                             appliance_usual_start_min=1200, appliance_usual_end_min=0)
-    bid_app.update_state({"timestamp": "23:50"})
-    assert check_bid(bid_app)["demand_kw"] > 0.0
-    print(f"Appliance bid: {check_bid(bid_app)}")
+    bid_solar, bid_battery, bid_ev, bid_app = _make_bid_agents()
+    print(f"Solar bid: {_check_bid(bid_solar)}")
+    print(f"Battery bid: {_check_bid(bid_battery)}")
+    print(f"EV bid: {_check_bid(bid_ev)}")
+    print(f"Appliance bid: {_check_bid(bid_app)}")
     print("-" * 30)
