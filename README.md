@@ -4,6 +4,8 @@ Multi-agent simulated smart-home microgrid — LangGraph bidding, PINN battery h
 
 AgentGrid is a simulated smart-home microgrid where autonomous agents (solar, battery, EV, appliances) score their own power urgency and a shared allocator arbitrates limited solar power between them.
 
+This repository is private pending a planned patent filing.
+
 ## Roadmap
 
 | # | Phase | Status |
@@ -41,7 +43,7 @@ Or run `python data/generate_dataset.py` directly for a sanity check + plot
 
 - `agents/` — Ayush
 - `data/` + integration — Bhavye
-- `simulation/` — Rahul
+
 
 ## Design history
 
