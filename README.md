@@ -93,6 +93,10 @@ an agent/allocator actually needs both — don't materialize the join in the sto
 Generator: `data/generate_dataset.py`, entry point `generate_dataset(seed=None) -> dict[str, pd.DataFrame]`.
 Sanity plot: run `python data/generate_dataset.py` directly → solar/load/EV SOC over the day.
 
+## Digital Twin (planned)
+
+In addition to the static synthetic dataset (data/generate_dataset.py), AgentGrid will include a live digital twin module (digital_twin/) — a tick-by-tick simulator that models the same system (solar, battery, EV, appliances) using real physics equations and real-world weather data, instead of pre-generated random curves. Solar generation is driven by live/historical weather data (Open-Meteo API, Vellore), battery behavior uses real charge/discharge physics with efficiency losses, and EV/appliance behavior remains scenario-based. Output matches the existing dataset schema exactly, so existing agents work with zero changes. This gives AgentGrid two interchangeable data sources: the static dataset for fast batch testing, and the digital twin for live, physically-grounded simulation.
+
 ## Current Progress
 
 - `agents/` holds the 4 agent classes (Solar, Battery, EV, Appliance) with

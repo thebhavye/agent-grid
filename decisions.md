@@ -59,6 +59,10 @@ it does not yet call `compute_urgency()` in its allocation loop; this is
 intentional. The contract above is designed so Phase 2 can safely consume
 it once urgency/bid packaging is integrated. Urgency formula unchanged.
 
+## 2026-10-06 — Add a digital twin as a second data source, alongside the static dataset
+Decision: build digital_twin/ as an ADDITIONAL live simulator (real physics + real weather data for solar), not a replacement for the existing static dataset generator. Both remain available; agents can consume either since both produce the same row schema.
+Why: the static dataset is fast and good for automated testing/CI; the digital twin gives a more realistic, defensible "real-time" story for demos and faculty/patent discussions, without risking the already-tested Phase 1/3 pipeline. Keeping both avoids a disruptive rewrite.
+
 ## Phase 2 prep — Agent bid object (get_bid())
 Decision: the agent-side bid is exactly
 `{"agent_id", "demand_kw", "urgency"}`, packaged generically in
