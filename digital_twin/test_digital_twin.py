@@ -654,12 +654,21 @@ class TestDigitalTwin:
         peak = max(r["household_load_kw"] for r in rows)
         assert peak < 4.0, f"implausible overnight/daytime peak: {peak} kW"
 
-    def test_battery_soc_matches_household_energy_budget(self):
-        """Always-on essentials can exhaust the battery; verify energy, not downtime."""
+    @pytest.mark.parametrize("seed", [42, 7, 123])
+    def test_battery_soc_matches_household_energy_budget(self, seed):
+        """Verify energy balance and bound depletion in the seeded default scenario."""
         cfg = BatteryModelConfig()
-        twin = make_test_twin(battery_config=cfg)
+        twin = make_test_twin(seed=seed, battery_config=cfg)
         energy = cfg.capacity_kwh * cfg.initial_soc_pct / 100
-        for row in twin.run_full_day():
+        # Each power term rounds to 3 decimals: net power error <= 0.001 kW.
+        # Convert its accumulated energy error to SOC using the worst efficiency.
+        soc_error_per_tick = (
+            2 * 0.5 * 10**-3 * (5 / 60)
+            * max(cfg.charge_efficiency, 1 / cfg.discharge_efficiency)
+            * 100 / cfg.capacity_kwh
+        )
+        worst_zero_run = current_zero_run = 0
+        for tick, row in enumerate(twin.run_full_day(), start=1):
             power = row["solar_gen_kw"] - row["household_load_kw"]
             power = max(-cfg.capacity_kwh * cfg.max_discharge_rate_c,
                         min(cfg.capacity_kwh * cfg.max_charge_rate_c, power))
@@ -667,10 +676,16 @@ class TestDigitalTwin:
             energy += (delta * cfg.charge_efficiency if delta > 0
                        else delta / cfg.discharge_efficiency)
             energy = max(0, min(cfg.capacity_kwh, energy))
-            # Twin rows round power to 3 decimals and SOC to 2 decimals.
+            # Add half a unit of the reported SOC's 2-decimal rounding.
+            tolerance = tick * soc_error_per_tick + 0.5 * 10**-2
             assert row["battery_soc_pct"] == pytest.approx(
-                100 * energy / cfg.capacity_kwh, abs=0.02
+                100 * energy / cfg.capacity_kwh, abs=tolerance, rel=0
             )
+            current_zero_run = current_zero_run + 1 if row["battery_soc_pct"] == 0 else 0
+            worst_zero_run = max(worst_zero_run, current_zero_run)
+        # Always-on essentials can drain the initial 6 kWh before sunrise.
+        # Accept at most 2 hours at zero in this mocked-weather scenario.
+        assert worst_zero_run <= 24, f"seed {seed}: battery pinned at 0 for {worst_zero_run} ticks"
 
     def test_existing_agents_accept_twin_row(self):
         """Integration contract: twin rows feed update_state() with NO agent changes."""
