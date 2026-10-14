@@ -109,20 +109,44 @@ seed=None opt-in rather than defaulting to it.
 ## 2026-10-14 — Digital twin vs generator solar scale divergence (issue #29)
 Decision: Document the ~50% peak solar difference between the digital twin
 (default 20 m², 20% efficiency, 4 kWp nameplate) and the dataset generator
-(peak_kw ~4.5–6.0 kW actual peak). Do not recalibrate.
+(synthetic curve amplitude peak_kw ~4.5–6.0 kW, before cloud dips and noise). Do not recalibrate.
 
 Measured ranges across seeds 1, 7, 42:
 - Generator (data/generate_dataset.py): peak 5.35–5.73 kW, mean daylight 2.3–3.0 kW, CV 0.58–0.73
 - Digital twin (default config, mocked/clear-sky weather peaking at 800 W/m²): peak 2.78 kW, mean daylight 1.93 kW, CV 0.41
 
+Here daylight means samples with solar output > 0.1 kW, excluding the
+generator's small positive nighttime sensor noise. CV is population standard
+deviation divided by the mean over those samples; it includes the daily
+curve's shape, not just cloud variability. These are mocked measurements,
+not live-weather measurements. Reproduce from the repository root:
+
+```python
+import numpy as np
+from data.generate_dataset import generate_dataset
+from digital_twin.test_digital_twin import make_test_twin
+from digital_twin.weather_client import _cache
+
+for seed in (1, 7, 42):
+    _cache.clear()
+    sources = {
+        "generator": generate_dataset(seed=seed)["timeseries"]["solar_gen_kw"].to_numpy(),
+        "mocked twin": np.array([r["solar_gen_kw"] for r in make_test_twin(seed=seed).run_full_day()]),
+    }
+    for name, values in sources.items():
+        daylight = values[values > 0.1]
+        print(seed, name, values.max(), daylight.mean(), daylight.std() / daylight.mean())
+```
+
 Why the difference:
 - Twin models a specific physical system: 20 m² × 20% = 4.0 kWp at STC (1000 W/m², 25°C).
   Under test/clear-sky conditions (800 W/m² peak irradiance, ~32°C ambient → ~57°C cell),
   temperature derating (-0.4%/°C) reduces output to ~2.78 kW actual peak. This is physically
-  correct for the modeled system in Vellore January conditions.
-- Generator uses a synthetic bell curve with peak_kw ~ Uniform(4.5, 6.0) as the *actual*
-  peak output, not a nameplate rating. It represents a statistical distribution of larger
-  residential systems (≈22–30 m² at 20% efficiency) or the same system under ideal STC.
+  consistent with the model under the mocked conditions; it does not establish
+  observed Vellore January output.
+- Generator uses a synthetic bell curve with peak_kw ~ Uniform(4.5, 6.0) as its
+  amplitude, not a nameplate rating. Cloud dips and sensor noise alter the actual
+  peak. The generator does not specify panel area or model physical system sizing.
 - Cloud-dip volatility: Generator explicitly adds multiplicative cloud dips (0.3–0.7× for
   10–30 min), giving CV ≈ 0.6–0.7. Twin relies on weather-source irradiance which includes
   natural cloud variability; the mocked/clear-sky test profile is a smooth bell curve (CV ≈ 0.4).
