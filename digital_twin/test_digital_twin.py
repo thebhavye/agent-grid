@@ -358,37 +358,47 @@ class TestWeatherClient:
 
         assert result_eastern == pytest.approx(result_naive_2230)
 
-    def test_historical_vs_forecast_uses_configured_timezone(self):
+    @pytest.mark.parametrize("zone, expected_date, endpoint", [
+        ("Asia/Kolkata", date(2024, 1, 16), WeatherClient.ARCHIVE_URL),
+        ("UTC", date(2024, 1, 15), WeatherClient.FORECAST_URL),
+    ])
+    def test_historical_vs_forecast_uses_configured_timezone(
+        self, monkeypatch, zone, expected_date, endpoint,
+    ):
+        """The same instant falls on different dates in UTC and Kolkata."""
+        import digital_twin.weather_client as weather_module
 
-        """Issue #28: Historical vs forecast decision uses configured timezone's current date."""
+        instant = datetime(2024, 1, 15, 20, 0, tzinfo=timezone.utc)
 
-        # This test verifies that the decision of whether a date is "historical"
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
 
-        # uses the configured timezone, not the system timezone.
+        monkeypatch.setattr(weather_module, "datetime", FrozenDatetime)
+        client, session = _mock_client(timezone=zone)
+        assert client._today_in_tz() == expected_date
+        client.get_weather(date(2024, 1, 15))
+        assert session.urls[0].startswith(endpoint + "?")
+        assert parse_qs(urlparse(session.urls[0]).query)["timezone"] == [zone]
 
-        # We can't easily test this without mocking datetime.now, but we can verify
+        _cache.clear()
+        session.urls.clear()
+        session._payload = _make_fake_hourly(expected_date)
+        assert client.get_weather()["date"] == expected_date
+        assert session.urls[0].startswith(WeatherClient.FORECAST_URL + "?")
 
-        # the _today_in_tz method works correctly.
-
-        client = WeatherClient(timezone="Asia/Kolkata")
-
-        today_kolkata = client._today_in_tz()
-
-        assert isinstance(today_kolkata, date)
-
-        client_utc = WeatherClient(timezone="UTC")
-
-        today_utc = client_utc._today_in_tz()
-
-        assert isinstance(today_utc, date)
-
-        # The two "today" dates might differ if run near midnight UTC
-
-        # But both should be valid dates
-
-        assert today_kolkata is not None
-
-        assert today_utc is not None
+    @pytest.mark.parametrize("method", [
+        "get_irradiance_at_minute", "get_temperature_at_minute", "get_cloudcover_at_minute",
+    ])
+    def test_aware_datetime_selects_normalized_weather_date(self, method):
+        target = date(2024, 1, 16)
+        session = FakeSession(target_date=target)
+        client = WeatherClient(session=session)
+        aware = datetime(2024, 1, 15, 19, 0, tzinfo=timezone.utc)
+        result = getattr(client, method)(aware)
+        assert f"start_date={target.isoformat()}" in session.urls[0]
+        assert result == pytest.approx(getattr(client, method)(datetime(2024, 1, 16, 0, 30)))
 
     def test_interpolation_across_midnight_boundary(self):
 
