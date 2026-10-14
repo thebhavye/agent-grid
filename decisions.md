@@ -71,3 +71,16 @@ Decision: the agent-side bid is exactly
 Why: the bid is per-agent/per-timestep state; timestep ownership stays
 with the caller (which already holds the row), so stamping time inside
 the bid would duplicate caller state and invite skew.
+
+## 2026-10-06 — Digital twin model assumptions (REAL DATA vs SIMPLIFIED PHYSICS vs SCENARIO)
+Decision: digital_twin/ splits the world into three honesty tiers. REAL EXTERNAL DATA: only
+solar irradiance/cloudcover/temperature from Open-Meteo (Vellore 12.97, 79.16, Asia/Kolkata;
+variables shortwave_radiation/cloudcover/temperature_2m; historical-date + cacheable so tests are
+repeatable and offline). SIMPLIFIED PHYSICS: solar PV (20 m2, 20% efficiency, -0.4%/C above 25C
+per c-Si STC convention) and battery (12 kWh midpoint of generator's 10-14 range, 90% round-trip
+as 0.949 each way, first-order thermal decay — explicitly NOT the Phase 5 PINN, health constant).
+SCENARIO-BASED: EV (overnight/midday/evening-topup segments mirroring generate_dataset.py as live
+state) and appliances (roster + usual-window stochastic cycles, no electrical physics).
+Why: keeps the twin defensible in demos/reviews without overstating fidelity; schema-identical rows
+(tested literally against generate_dataset output) let agents consume either source unchanged, and
+run_simulation.py stays unwired until a separate integration task.
