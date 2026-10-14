@@ -44,6 +44,42 @@ def test_get_bid_packaging():
     assert _check_bid(appliance)["demand_kw"] > 0.0
 
 
+def test_nonfinite_soc_raises_loudly():
+    """Issue #26: NaN/Inf state must raise, not yield contradictory pairs."""
+    import math
+
+    import pytest
+
+    battery = BatteryAgent("battery_nan")
+    battery.update_state({"battery_soc_pct": float("nan")})
+    with pytest.raises(ValueError, match="finite"):
+        battery.get_demand_kw()
+    with pytest.raises(ValueError, match="finite"):
+        battery.compute_urgency()
+
+    ev = EVAgent("ev_inf", max_charge_kw=7.0)
+    ev.update_state({"ev_soc_pct": 20.0, "ev_departure_min": math.inf,
+                     "timestamp": "00:00"})
+    with pytest.raises(ValueError, match="finite"):
+        ev.compute_urgency()
+    ev.update_state({"ev_soc_pct": float("nan"), "ev_departure_min": 30,
+                     "timestamp": "00:00"})
+    with pytest.raises(ValueError, match="finite"):
+        ev.get_demand_kw()
+
+
+def test_infinite_appliance_power_raises():
+    """Issue #26: Inf rated power must raise; None/NaN keeps the 1 kW default."""
+    import pytest
+
+    app = ApplianceAgent("app_inf", appliance_power_kw=float("inf"))
+    with pytest.raises(ValueError, match="finite"):
+        app.get_demand_kw()
+
+    assert ApplianceAgent("app_none").get_demand_kw() == 1.0
+    assert ApplianceAgent("app_nan", appliance_power_kw=float("nan")).get_demand_kw() == 1.0
+
+
 if __name__ == "__main__":
     print("=== AGENTGRID URGENCY TESTS ===")
 

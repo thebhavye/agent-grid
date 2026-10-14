@@ -1,6 +1,16 @@
 from agents.base_agent import Agent
 
+import math
+
 EV_TARGET_SOC_PCT = 100.0
+
+
+def _require_finite(value, name):
+    """Coerce to float, rejecting NaN/Inf loudly (issue #26)."""
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    return result
 
 
 class EVAgent(Agent):
@@ -36,7 +46,7 @@ class EVAgent(Agent):
             return 0.0
         if self.ev_soc_pct is None:
             return 0.0
-        gap = max(0.0, EV_TARGET_SOC_PCT - float(self.ev_soc_pct))
+        gap = max(0.0, EV_TARGET_SOC_PCT - _require_finite(self.ev_soc_pct, "ev_soc_pct"))
         return self.max_charge_kw * (gap / 100.0)
 
     def compute_urgency(self):
@@ -46,12 +56,14 @@ class EVAgent(Agent):
         if self.ev_departure_min is None or self._current_min is None:
             return 0.0
             
-        soc_gap = max(0.0, EV_TARGET_SOC_PCT - float(self.ev_soc_pct)) / 100.0
+        soc_gap = max(
+            0.0, EV_TARGET_SOC_PCT - _require_finite(self.ev_soc_pct, "ev_soc_pct")
+        ) / 100.0
         if soc_gap <= 0.0:
             return 0.0
             
-        dep_min = float(self.ev_departure_min)
-        curr_min = float(self._current_min)
+        dep_min = _require_finite(self.ev_departure_min, "ev_departure_min")
+        curr_min = _require_finite(self._current_min, "timestamp")
         
         # Wrapped overnight logic pulled from ApplianceAgent
         minutes_left = dep_min - curr_min if dep_min >= curr_min else (dep_min + 1440.0) - curr_min

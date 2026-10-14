@@ -1,6 +1,16 @@
 from agents.base_agent import Agent
 
+import math
+
 BATTERY_MAX_CHARGE_KW = 5.0
+
+
+def _require_finite_soc(value):
+    """Coerce SOC to float, rejecting NaN/Inf loudly (issue #26)."""
+    soc = float(value)
+    if not math.isfinite(soc):
+        raise ValueError(f"battery_soc_pct must be finite, got {value!r}")
+    return soc
 
 
 class BatteryAgent(Agent):
@@ -28,12 +38,12 @@ class BatteryAgent(Agent):
         # tracked but does not scale demand yet (out of scope).
         if self.battery_soc_pct is None:
             return 0.0
-        gap = max(0.0, 100.0 - float(self.battery_soc_pct))
+        gap = max(0.0, 100.0 - _require_finite_soc(self.battery_soc_pct))
         return BATTERY_MAX_CHARGE_KW * (gap / 100.0)
 
     def compute_urgency(self):
         if self.battery_soc_pct is None:
             return 0.0
         # Non-linear curve
-        urgency = ((100.0 - float(self.battery_soc_pct)) / 100.0) ** 2
+        urgency = ((100.0 - _require_finite_soc(self.battery_soc_pct)) / 100.0) ** 2
         return max(0.0, min(1.0, urgency))

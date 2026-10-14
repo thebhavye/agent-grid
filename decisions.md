@@ -105,3 +105,12 @@ Why: seed=None (random.Random(None)) made every default twin a different
 day, so overnight spikes and test results were irreproducible.
 Revisit: if a "random day" mode is ever wanted, require an explicit
 seed=None opt-in rather than defaulting to it.
+
+## Issue #26 — Fail-fast bid/input validation
+Decision: Battery/EV agents raise ValueError on non-finite SOC/departure
+(ApplianceAgent keeps its 1.0 kW graceful default for missing/NaN rated
+power but raises on Inf), and baseline allocate() rejects NaN/Inf/negative
+available power or demands instead of propagating NaN allocations.
+Why: one bad sensor value silently corrupted the whole timestep (e.g. NaN
+battery SOC -> demand 0.0 + urgency 1.0); Phase 2 bidding needs trustworthy
+bids, so invalid input fails loudly at the source.

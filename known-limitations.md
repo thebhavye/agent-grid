@@ -19,9 +19,10 @@
 - Battery/EV max charge rate constants (BATTERY_MAX_CHARGE_KW, EV max
   charge kw) are hardcoded, not derived from a shared config or the
   dataset generator's own capacity assumptions.
-- Battery/EV agents don't validate NaN input — NaN SOC produces
-  contradictory demand/urgency pairs (e.g. Battery demand 0.0 with urgency
-  1.0); not reachable with current generator output, which never emits NaN.
+- Battery/EV agents and the baseline allocator reject non-finite or
+  negative inputs with ValueError (fail fast at the source, issue #26);
+  ApplianceAgent still substitutes 1.0 kW for missing/NaN rated power
+  (graceful default, not an error).
 - EVAgent.ev_plugged_in bool() coercion mistreats string values like
   "False" as truthy; not reachable via generator output (real bools), only
   hand-built test rows.
