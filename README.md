@@ -145,3 +145,7 @@ Notes:
   capped proportional baseline allocator over it.
 - `test_agents.py` exercises the agents; `test_baseline.py` /
   `test_simulation.py` cover the allocator and end-to-end pipeline.
+
+## Visualization
+
+Run `python viz/plot_day.py --seed 42` to save `day_plot.png` with solar vs allocated power, allocations by agent group, and dataset battery/EV SOC with EV plug-in shading. SOC comes from the static dataset, not allocation feedback. Run the headless tests with `python -m pytest viz/test_plot_day.py`.
