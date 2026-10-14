@@ -21,7 +21,7 @@ Design: The network layer can be mocked easily by passing a custom
 import json
 import logging
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlencode
@@ -97,7 +97,7 @@ class WeatherClient:
         (Asia/Kolkata by default); aware datetimes are converted.
         """
         try:
-            ZoneInfo(timezone)
+            self._tz = ZoneInfo(timezone)
         except Exception as exc:
             raise ValueError(f"unknown timezone: {timezone!r}") from exc
         self.latitude = latitude
@@ -144,6 +144,24 @@ class WeatherClient:
             except OSError:
                 pass  # Cache write failure is non-fatal
 
+    def _normalize_datetime(self, dt: datetime) -> datetime:
+        """Normalize a datetime to the client's configured timezone.
+
+        - If dt is timezone-aware, convert it to the configured timezone.
+        - If dt is naive, treat it as a wall-clock time in the configured timezone.
+        Returns a timezone-aware datetime in the configured timezone.
+        """
+        if dt.tzinfo is not None:
+            # Aware datetime: convert to configured timezone
+            return dt.astimezone(self._tz)
+        else:
+            # Naive datetime: interpret as wall-clock in configured timezone
+            return dt.replace(tzinfo=self._tz)
+
+    def _today_in_tz(self) -> date:
+        """Return today's date in the configured timezone."""
+        return self._today()
+
     def _build_url(self, target_date: date, is_historical: bool) -> str:
         """Build the API request URL."""
         base_url = self.ARCHIVE_URL if is_historical else self.FORECAST_URL
@@ -182,7 +200,7 @@ class WeatherClient:
 
     def _fetch_from_api(self, target_date: date) -> dict:
         """Fetch weather data from Open-Meteo API."""
-        today = self._today()
+        today = self._today_in_tz()
         is_historical = target_date < today
 
         url = self._build_url(target_date, is_historical)
@@ -220,9 +238,9 @@ class WeatherClient:
         force a retry.
 
         Args:
-            target_date: Date to fetch weather for. Defaults to today.
-                         Historical dates use the archive API; today/future
-                         use the forecast API.
+            target_date: Date to fetch weather for. Defaults to today in the
+                         configured timezone. Historical dates use the archive
+                         API; today/future use the forecast API.
 
         Returns:
             Dict with keys:
@@ -240,7 +258,7 @@ class WeatherClient:
                 they trigger the fallback chain above.
         """
         if target_date is None:
-            target_date = date.today()
+            target_date = self._today_in_tz()
 
         # Try cache first
         cached = self._get_cached(target_date)
@@ -381,19 +399,27 @@ class WeatherClient:
 
         Args:
             target_datetime: The exact datetime to get irradiance for.
+                             Timezone-aware datetimes are converted to the
+                             client's configured timezone. Naive datetimes
+                             are treated as wall-clock times in the configured
+                             timezone.
 
         Returns:
             Irradiance in W/m² (float, >= 0).
         """
-        target_date = target_datetime.date()
+        normalized = self._normalize_datetime(target_datetime)
+        target_date = normalized.date()
         weather = self.get_weather(target_date)
 
-        # Parse hourly times and find surrounding hours
-        hourly_times = [datetime.fromisoformat(t) for t in weather["time"]]
+        # Parse hourly times as timezone-aware in the configured timezone
+        hourly_times = [
+            datetime.fromisoformat(t).replace(tzinfo=self._tz)
+            for t in weather["time"]
+        ]
         irradiance_values = weather["shortwave_radiation"]
 
         # Find the two hours that bracket our target time
-        target_minute = target_datetime.replace(second=0, microsecond=0)
+        target_minute = normalized.replace(second=0, microsecond=0)
 
         for i in range(len(hourly_times) - 1):
             if hourly_times[i] <= target_minute < hourly_times[i + 1]:
@@ -420,14 +446,26 @@ class WeatherClient:
         return 0.0
 
     def get_temperature_at_minute(self, target_datetime: datetime) -> float:
-        """Get temperature (°C) interpolated to a specific minute."""
-        target_date = target_datetime.date()
+        """Get temperature (°C) interpolated to a specific minute.
+
+        Args:
+            target_datetime: The exact datetime to get temperature for.
+                             Timezone-aware datetimes are converted to the
+                             client's configured timezone. Naive datetimes
+                             are treated as wall-clock times in the configured
+                             timezone.
+        """
+        normalized = self._normalize_datetime(target_datetime)
+        target_date = normalized.date()
         weather = self.get_weather(target_date)
 
-        hourly_times = [datetime.fromisoformat(t) for t in weather["time"]]
+        hourly_times = [
+            datetime.fromisoformat(t).replace(tzinfo=self._tz)
+            for t in weather["time"]
+        ]
         temp_values = weather["temperature_2m"]
 
-        target_minute = target_datetime.replace(second=0, microsecond=0)
+        target_minute = normalized.replace(second=0, microsecond=0)
 
         for i in range(len(hourly_times) - 1):
             if hourly_times[i] <= target_minute < hourly_times[i + 1]:
@@ -449,14 +487,26 @@ class WeatherClient:
         return 25.0
 
     def get_cloudcover_at_minute(self, target_datetime: datetime) -> float:
-        """Get cloud cover (%) interpolated to a specific minute."""
-        target_date = target_datetime.date()
+        """Get cloud cover (%) interpolated to a specific minute.
+
+        Args:
+            target_datetime: The exact datetime to get cloud cover for.
+                             Timezone-aware datetimes are converted to the
+                             client's configured timezone. Naive datetimes
+                             are treated as wall-clock times in the configured
+                             timezone.
+        """
+        normalized = self._normalize_datetime(target_datetime)
+        target_date = normalized.date()
         weather = self.get_weather(target_date)
 
-        hourly_times = [datetime.fromisoformat(t) for t in weather["time"]]
+        hourly_times = [
+            datetime.fromisoformat(t).replace(tzinfo=self._tz)
+            for t in weather["time"]
+        ]
         cloud_values = weather["cloudcover"]
 
-        target_minute = target_datetime.replace(second=0, microsecond=0)
+        target_minute = normalized.replace(second=0, microsecond=0)
 
         for i in range(len(hourly_times) - 1):
             if hourly_times[i] <= target_minute < hourly_times[i + 1]:

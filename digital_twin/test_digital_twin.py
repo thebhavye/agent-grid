@@ -12,7 +12,8 @@ Run everything (requires internet) with:
 
 import logging
 import math
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -261,6 +262,210 @@ class TestWeatherClient:
         assert client.weather_source == "api"
         client.get_weather(TEST_DATE)
         assert client.weather_source == "cache"
+
+
+# Timezone handling regression tests (Issue #28)
+    # ---------------------------------------------------------------------------
+
+    def test_aware_datetime_utc_no_crash(self):
+
+        """Issue #28: aware datetime in UTC should not raise TypeError."""
+
+        client, _ = _mock_client()
+
+        # This used to crash with "can't compare offset-naive and offset-aware datetimes"
+
+        dt_utc = datetime(2024, 1, 15, 12, 0, tzinfo=timezone.utc)
+
+        result = client.get_irradiance_at_minute(dt_utc)
+
+        assert isinstance(result, float)
+
+        assert result >= 0.0
+
+    def test_aware_datetime_utc_converted_to_configured_tz(self):
+
+        """Issue #28: UTC datetime should be interpreted as equivalent Asia/Kolkata wall time.
+
+        12:00 UTC = 17:30 IST (Asia/Kolkata is UTC+5:30).
+
+        The result should match a naive 17:30 call, not a naive 12:00 call.
+        """
+
+        client, _ = _mock_client()
+
+        # 12:00 UTC = 17:30 Asia/Kolkata
+
+        dt_utc = datetime(2024, 1, 15, 12, 0, tzinfo=timezone.utc)
+
+        result_utc = client.get_irradiance_at_minute(dt_utc)
+
+        # Naive 17:30 should be interpreted as 17:30 Asia/Kolkata (same wall time)
+
+        dt_naive_1730 = datetime(2024, 1, 15, 17, 30)
+
+        result_naive_1730 = client.get_irradiance_at_minute(dt_naive_1730)
+
+        # They should be equal (same wall time in configured timezone)
+
+        assert result_utc == pytest.approx(result_naive_1730)
+
+        # Naive 12:00 should be different (that's 12:00 Asia/Kolkata = 06:30 UTC)
+
+        dt_naive_1200 = datetime(2024, 1, 15, 12, 0)
+
+        result_naive_1200 = client.get_irradiance_at_minute(dt_naive_1200)
+
+        assert result_utc != result_naive_1200
+
+    def test_naive_datetime_treated_as_configured_tz_wall_time(self):
+
+        """Issue #28: Naive datetimes are wall-clock times in configured timezone."""
+
+        client, _ = _mock_client()
+
+        # Naive datetime should be interpreted as Asia/Kolkata wall time
+
+        dt_naive = datetime(2024, 1, 15, 12, 0)
+
+        result = client.get_irradiance_at_minute(dt_naive)
+
+        # This should match an aware datetime at 12:00 Asia/Kolkata
+
+        dt_aware_ist = datetime(2024, 1, 15, 12, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
+
+        result_aware = client.get_irradiance_at_minute(dt_aware_ist)
+
+        assert result == pytest.approx(result_aware)
+
+    def test_aware_datetime_other_timezone_converted_correctly(self):
+
+        """Issue #28: Aware datetimes in other timezones are converted to configured timezone."""
+
+        client, _ = _mock_client()
+
+        # 12:00 US/Eastern (EST, UTC-5) = 17:00 UTC = 22:30 Asia/Kolkata
+
+        dt_eastern = datetime(2024, 1, 15, 12, 0, tzinfo=ZoneInfo("America/New_York"))
+
+        result_eastern = client.get_irradiance_at_minute(dt_eastern)
+
+        # Should match naive 22:30 (which is 22:30 Asia/Kolkata)
+
+        dt_naive_2230 = datetime(2024, 1, 15, 22, 30)
+
+        result_naive_2230 = client.get_irradiance_at_minute(dt_naive_2230)
+
+        assert result_eastern == pytest.approx(result_naive_2230)
+
+    @pytest.mark.parametrize("zone, expected_date, endpoint", [
+        ("Asia/Kolkata", date(2024, 1, 16), WeatherClient.ARCHIVE_URL),
+        ("UTC", date(2024, 1, 15), WeatherClient.FORECAST_URL),
+    ])
+    def test_historical_vs_forecast_uses_configured_timezone(
+        self, monkeypatch, zone, expected_date, endpoint,
+    ):
+        """The same instant falls on different dates in UTC and Kolkata."""
+        import digital_twin.weather_client as weather_module
+
+        instant = datetime(2024, 1, 15, 20, 0, tzinfo=timezone.utc)
+
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
+
+        monkeypatch.setattr(weather_module, "datetime", FrozenDatetime)
+        client, session = _mock_client(timezone=zone)
+        assert client._today_in_tz() == expected_date
+        client.get_weather(date(2024, 1, 15))
+        assert session.urls[0].startswith(endpoint + "?")
+        assert parse_qs(urlparse(session.urls[0]).query)["timezone"] == [zone]
+
+        _cache.clear()
+        session.urls.clear()
+        session._payload = _make_fake_hourly(expected_date)
+        assert client.get_weather()["date"] == expected_date
+        assert session.urls[0].startswith(WeatherClient.FORECAST_URL + "?")
+
+    @pytest.mark.parametrize("method", [
+        "get_irradiance_at_minute", "get_temperature_at_minute", "get_cloudcover_at_minute",
+    ])
+    def test_aware_datetime_selects_normalized_weather_date(self, method):
+        target = date(2024, 1, 16)
+        session = FakeSession(target_date=target)
+        client = WeatherClient(session=session)
+        aware = datetime(2024, 1, 15, 19, 0, tzinfo=timezone.utc)
+        result = getattr(client, method)(aware)
+        assert f"start_date={target.isoformat()}" in session.urls[0]
+        assert result == pytest.approx(getattr(client, method)(datetime(2024, 1, 16, 0, 30)))
+
+    def test_interpolation_across_midnight_boundary(self):
+
+        """Issue #28: Interpolation works correctly around midnight and date boundaries."""
+
+        client, _ = _mock_client()
+
+        # Test near midnight: 23:30 and 00:30 next day
+
+        dt_late = datetime(2024, 1, 15, 23, 30)
+
+        dt_early = datetime(2024, 1, 16, 0, 30)
+
+        result_late = client.get_irradiance_at_minute(dt_late)
+
+        result_early = client.get_irradiance_at_minute(dt_early)
+
+        # Both should be valid (nighttime, so irradiance should be 0 or very low)
+
+        assert isinstance(result_late, float)
+
+        assert isinstance(result_early, float)
+
+        assert result_late >= 0.0
+
+        assert result_early >= 0.0
+
+        # At night, irradiance should be 0
+
+        assert result_late == 0.0
+
+        assert result_early == 0.0
+
+    def test_interpolation_with_aware_datetimes_across_midnight(self):
+
+        """Issue #28: Interpolation with aware datetimes across midnight works correctly."""
+
+        client, _ = _mock_client()
+
+        # Test with UTC times that cross midnight in Asia/Kolkata
+
+        # 18:00 UTC = 23:30 IST (Jan 15)
+
+        # 19:00 UTC = 00:30 IST (Jan 16)
+
+        dt_utc_late = datetime(2024, 1, 15, 18, 0, tzinfo=timezone.utc)
+
+        dt_utc_early = datetime(2024, 1, 15, 19, 0, tzinfo=timezone.utc)
+
+        result_late = client.get_irradiance_at_minute(dt_utc_late)
+
+        result_early = client.get_irradiance_at_minute(dt_utc_early)
+
+        assert isinstance(result_late, float)
+
+        assert isinstance(result_early, float)
+
+        assert result_late >= 0.0
+
+        assert result_early >= 0.0
+
+        # Both should be nighttime (0 irradiance)
+
+        assert result_late == 0.0
+
+        assert result_early == 0.0
+
 
 
 # ---------------------------------------------------------------------------
