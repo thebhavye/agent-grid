@@ -247,10 +247,11 @@ class ApplianceModel:
         Pass a seed to re-seed with a different stream instead. (A model
         originally built with seed=None cannot replay deterministically.)
         """
-        if seed is None:
-            seed = self.config.seed
+        # Use provided seed, or fall back to original config seed for exact replay
+        effective_seed = seed if seed is not None else self.config.seed
+        self._rng = random.Random(effective_seed)
         self.__init__(ApplianceModelConfig(
-            seed=seed,
+            seed=effective_seed,
             appliances=self.config.appliances,
             base_load_kw=self.config.base_load_kw,
         ))

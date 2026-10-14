@@ -69,6 +69,8 @@ class DigitalTwin:
 
         # Initialize weather client
         self._weather_client = config.weather_client or WeatherClient()
+        # Store weather date override for reset()
+        self._weather_date_override = config.weather_date_override
         # Anchor date for the weather profile. Multi-day runs reuse this
         # single day's profile (time-of-day lookup) instead of issuing a
         # new network request per simulated date, consistent with EV and
@@ -224,10 +226,17 @@ class DigitalTwin:
         so a reset twin replays exactly like a freshly constructed one
         (issue #23).
         """
+        # Reset to original start datetime unless a new one is provided
         self._current_time = (
             start_datetime if start_datetime is not None else self._start_datetime
         )
         self._step_count = 0
+        # Recompute weather anchor: use override if configured, else the (new) start date
+        self._weather_date = (
+            self._weather_date_override.date()
+            if self._weather_date_override
+            else self._current_time.date()
+        )
         self._ev.reset()
         self._appliances.reset()
         # Re-initialize battery to config defaults

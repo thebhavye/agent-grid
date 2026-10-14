@@ -284,11 +284,12 @@ class EVModel:
         a different stream instead. (A model originally built with
         seed=None cannot replay deterministically.)
         """
-        if seed is None:
-            seed = self.config.seed
+        # Use provided seed, or fall back to original config seed for exact replay
+        effective_seed = seed if seed is not None else self.config.seed
+        self._rng = random.Random(effective_seed)
         self.__init__(EVModelConfig(
-            scenario=self._scenario,
-            seed=seed,
+            scenario=self.config.scenario,
+            seed=effective_seed,
             battery_capacity_kwh=self.config.battery_capacity_kwh,
             max_charge_kw=self.config.max_charge_kw,
             charge_efficiency=self.config.charge_efficiency,
