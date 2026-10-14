@@ -276,9 +276,16 @@ class EVModel:
         return self._current_minute
 
     def reset(self, seed: Optional[int] = None) -> None:
-        """Reset EV to initial state with optional new seed."""
-        if seed is not None:
-            self._rng = random.Random(seed)
+        """Reset EV to its initial state.
+
+        With no argument the original config seed is reused, so the reset
+        model regenerates identical segments and replays identically to a
+        freshly constructed one (issue #23). Pass a seed to re-seed with
+        a different stream instead. (A model originally built with
+        seed=None cannot replay deterministically.)
+        """
+        if seed is None:
+            seed = self.config.seed
         self.__init__(EVModelConfig(
             scenario=self._scenario,
             seed=seed,

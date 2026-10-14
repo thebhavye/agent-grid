@@ -62,6 +62,7 @@ class DigitalTwin:
         if config.start_datetime is None:
             raise ValueError("start_datetime is required")
 
+        self._start_datetime = config.start_datetime
         self._current_time = config.start_datetime
         self._time_delta_min = config.time_delta_min
         self._step_count = 0
@@ -215,10 +216,20 @@ class DigitalTwin:
         return rows
 
     def reset(self, start_datetime: Optional[datetime] = None) -> None:
-        """Reset twin to initial state."""
-        if start_datetime is not None:
-            self._current_time = start_datetime
+        """Reset twin to its initial state.
+
+        Restores the start time (or jumps to start_datetime when given),
+        rewinds EV/appliance RNG and segments via their reset() methods,
+        rebuilds the battery from config, and re-initializes sub-models —
+        so a reset twin replays exactly like a freshly constructed one
+        (issue #23).
+        """
+        self._current_time = (
+            start_datetime if start_datetime is not None else self._start_datetime
+        )
         self._step_count = 0
-        self._initialize_models()
+        self._ev.reset()
+        self._appliances.reset()
         # Re-initialize battery to config defaults
         self._battery = BatteryModel(self._battery.config)
+        self._initialize_models()
