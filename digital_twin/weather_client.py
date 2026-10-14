@@ -105,12 +105,39 @@ class WeatherClient:
         """Generate cache key for a given date."""
         return (self.latitude, self.longitude, target_date.isoformat())
 
+    def _is_valid_cached_profile(self, data: Any) -> bool:
+        """Check if cached data has the required weather profile structure."""
+        if not isinstance(data, dict):
+            return False
+        required_keys = {"time", "shortwave_radiation", "cloudcover", "temperature_2m", "date"}
+        if not required_keys.issubset(data.keys()):
+            return False
+        # Validate types
+        if not isinstance(data["time"], list) or not data["time"]:
+            return False
+        if not isinstance(data["shortwave_radiation"], list):
+            return False
+        if not isinstance(data["cloudcover"], list):
+            return False
+        if not isinstance(data["temperature_2m"], list):
+            return False
+        if len(data["shortwave_radiation"]) != 24:
+            return False
+        if len(data["cloudcover"]) != 24:
+            return False
+        if len(data["temperature_2m"]) != 24:
+            return False
+        return True
+
     def _get_cached(self, target_date: date) -> Optional[dict]:
         """Try to retrieve cached data for the given date."""
         key = self._cache_key(target_date)
         # Check in-memory cache first
         if key in _cache:
-            return _cache[key]
+            if self._is_valid_cached_profile(_cache[key]):
+                return _cache[key]
+            # Invalid structure in memory - remove it
+            del _cache[key]
         # Check file-based cache
         if self._cache_dir:
             cache_file = self._cache_dir / f"{key[0]}_{key[1]}_{key[2]}.json"
@@ -118,6 +145,9 @@ class WeatherClient:
                 try:
                     with open(cache_file, "r") as f:
                         data = json.load(f)
+                    # Validate cache structure before accepting
+                    if not self._is_valid_cached_profile(data):
+                        return None
                     if isinstance(data.get("date"), str):
                         data["date"] = date.fromisoformat(data["date"])
                     _cache[key] = data  # Populate in-memory cache

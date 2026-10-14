@@ -291,6 +291,46 @@ class TestWeatherClient:
         assert len(session.urls) == 1
         assert len(data["shortwave_radiation"]) == 24
 
+    def test_invalid_json_cache_structure_falls_back_to_fetch(self, tmp_path):
+        """Valid JSON with invalid profile shape is treated as a cache miss."""
+        # Test array instead of object
+        client, session = _mock_client(cache_dir=str(tmp_path))
+        cache_file = tmp_path / (
+            f"{client.latitude}_{client.longitude}_{TEST_DATE.isoformat()}.json"
+        )
+        cache_file.write_text("[]")
+        data = client.get_weather(TEST_DATE)
+        assert len(session.urls) == 1, f"expected fetch, got source={client.weather_source}"
+        assert len(data["shortwave_radiation"]) == 24
+        assert client.weather_source == "api"
+
+        # Test null - clear in-memory cache to avoid hit from previous fetch
+        _cache.clear()
+        client2, session2 = _mock_client(cache_dir=str(tmp_path))
+        cache_file.write_text("null")
+        data2 = client2.get_weather(TEST_DATE)
+        assert len(session2.urls) == 1, f"expected fetch, got source={client2.weather_source}"
+        assert len(data2["shortwave_radiation"]) == 24
+        assert client2.weather_source == "api"
+
+        # Test empty object (missing required fields)
+        _cache.clear()
+        client3, session3 = _mock_client(cache_dir=str(tmp_path))
+        cache_file.write_text("{}")
+        data3 = client3.get_weather(TEST_DATE)
+        assert len(session3.urls) == 1, f"expected fetch, got source={client3.weather_source}"
+        assert len(data3["shortwave_radiation"]) == 24
+        assert client3.weather_source == "api"
+
+        # Test object with only date (missing weather arrays)
+        _cache.clear()
+        client4, session4 = _mock_client(cache_dir=str(tmp_path))
+        cache_file.write_text('{"date": "2024-01-15"}')
+        data4 = client4.get_weather(TEST_DATE)
+        assert len(session4.urls) == 1, f"expected fetch, got source={client4.weather_source}"
+        assert len(data4["shortwave_radiation"]) == 24
+        assert client4.weather_source == "api"
+
     def test_get_weather_for_date_convenience(self):
         """Issue #27: the module convenience function serves the date asked."""
         from unittest.mock import patch
