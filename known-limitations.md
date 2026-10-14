@@ -59,3 +59,15 @@
   is always "outside window" and logs a missed-window event every timestep.
 - `.pytest_cache/` is not in .gitignore (untracked locally, but one
   `git add -A` would sweep it in).
+- Digital twin solar peak is ~50% below generator peak (issue #29):
+  twin default (20 m², 20%, 4 kWp) peaks at ~2.78 kW under 800 W/m² clear-sky
+  conditions with temperature derating; generator peaks at 5.35–5.73 kW
+  (synthetic peak_kw ~ Uniform(4.5, 6.0)). Twin also lacks generator's
+  explicit cloud-dip volatility (twin CV ≈ 0.41 vs generator CV ≈ 0.58–0.73
+  in mocked tests, using output > 0.1 kW and population standard deviation;
+  see decisions.md for reproduction). CV includes the daily curve shape,
+  not only cloud variability. Live-cloud volatility was not measured.
+  This is a modeling-choice divergence, not a bug:
+  twin = specific physical system + real weather; generator = statistical
+  synthetic solar curves + synthetic clouds. Schema compatibility
+  is maintained; users can configure a larger panel_area_m2 if needed.
