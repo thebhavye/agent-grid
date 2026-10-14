@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from digital_twin.appliance_model import ApplianceModel, ApplianceModelConfig
+from digital_twin.appliance_model import ApplianceModel, ApplianceModelConfig, ApplianceSpec
 from digital_twin.battery_model import BatteryModel, BatteryModelConfig
 from digital_twin.ev_model import EVModel, EVModelConfig, EVScenario
 from digital_twin.solar_model import SolarModel, SolarModelConfig
@@ -416,6 +416,42 @@ class TestBatteryModel:
 
 
 # ---------------------------------------------------------------------------
+# Appliance model tests
+# ---------------------------------------------------------------------------
+
+class TestApplianceModel:
+    @pytest.mark.parametrize("seed", [42, 7, 123])
+    def test_essentials_stay_on_for_full_day(self, seed):
+        model = ApplianceModel(ApplianceModelConfig(seed=seed))
+        model.initialize_at(datetime(2024, 1, 15))
+        essentials = [spec for spec in model.config.appliances if not spec.deferable]
+        minimum_load = model.config.base_load_kw + sum(spec.power_kw for spec in essentials)
+
+        for tick in range(288):
+            result = model.tick(5)
+            for spec in essentials:
+                assert model.get_appliance_state(spec.appliance_id)["is_on"], (
+                    f"{spec.appliance_id} turned off at tick {tick}, seed {seed}"
+                )
+                assert spec.appliance_id in result["active_appliances"]
+                assert result["appliance_loads"][spec.appliance_id] == spec.power_kw
+            assert result["total_load_kw"] >= minimum_load
+            assert model.total_load_kw == pytest.approx(result["total_load_kw"])
+
+    def test_deferable_cycle_still_ends(self):
+        spec = ApplianceSpec(
+            "dishwasher", 4, True, 1.2, 0, 10,
+            min_runtime_min=5, max_runtime_min=5, cycle_prob_per_hour=12,
+        )
+        model = ApplianceModel(ApplianceModelConfig(seed=42, appliances=[spec]))
+        model.initialize_at(datetime(2024, 1, 15))
+
+        assert model.tick(5)["appliance_loads"]["dishwasher"] == 1.2
+        assert model.tick(5)["appliance_loads"]["dishwasher"] == 0.0
+        assert not model.get_appliance_state("dishwasher")["is_on"]
+
+
+# ---------------------------------------------------------------------------
 # Twin schema + full-day + agent compatibility tests
 # ---------------------------------------------------------------------------
 
@@ -642,15 +678,38 @@ class TestDigitalTwin:
         peak = max(r["household_load_kw"] for r in rows)
         assert peak < 4.0, f"implausible overnight/daytime peak: {peak} kW"
 
-    def test_battery_not_pinned_at_zero_overnight(self):
-        """Battery SOC sits at 0 for at most 6 consecutive ticks."""
-        twin = make_test_twin()
-        rows = twin.run_full_day()
-        worst_run = current = 0
-        for r in rows:
-            current = current + 1 if r["battery_soc_pct"] == 0 else 0
-            worst_run = max(worst_run, current)
-        assert worst_run <= 6, f"battery pinned at 0 for {worst_run} ticks"
+    @pytest.mark.parametrize("seed", [42, 7, 123])
+    def test_battery_soc_matches_household_energy_budget(self, seed):
+        """Verify energy balance and bound depletion in the seeded default scenario."""
+        cfg = BatteryModelConfig()
+        twin = make_test_twin(seed=seed, battery_config=cfg)
+        energy = cfg.capacity_kwh * cfg.initial_soc_pct / 100
+        # Each power term rounds to 3 decimals: net power error <= 0.001 kW.
+        # Convert its accumulated energy error to SOC using the worst efficiency.
+        soc_error_per_tick = (
+            2 * 0.5 * 10**-3 * (5 / 60)
+            * max(cfg.charge_efficiency, 1 / cfg.discharge_efficiency)
+            * 100 / cfg.capacity_kwh
+        )
+        worst_zero_run = current_zero_run = 0
+        for tick, row in enumerate(twin.run_full_day(), start=1):
+            power = row["solar_gen_kw"] - row["household_load_kw"]
+            power = max(-cfg.capacity_kwh * cfg.max_discharge_rate_c,
+                        min(cfg.capacity_kwh * cfg.max_charge_rate_c, power))
+            delta = power * 5 / 60
+            energy += (delta * cfg.charge_efficiency if delta > 0
+                       else delta / cfg.discharge_efficiency)
+            energy = max(0, min(cfg.capacity_kwh, energy))
+            # Add half a unit of the reported SOC's 2-decimal rounding.
+            tolerance = tick * soc_error_per_tick + 0.5 * 10**-2
+            assert row["battery_soc_pct"] == pytest.approx(
+                100 * energy / cfg.capacity_kwh, abs=tolerance, rel=0
+            )
+            current_zero_run = current_zero_run + 1 if row["battery_soc_pct"] == 0 else 0
+            worst_zero_run = max(worst_zero_run, current_zero_run)
+        # Always-on essentials can drain the initial 6 kWh before sunrise.
+        # Accept at most 2 hours at zero in this mocked-weather scenario.
+        assert worst_zero_run <= 24, f"seed {seed}: battery pinned at 0 for {worst_zero_run} ticks"
 
     def test_existing_agents_accept_twin_row(self):
         """Integration contract: twin rows feed update_state() with NO agent changes."""

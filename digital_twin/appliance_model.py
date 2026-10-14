@@ -137,6 +137,8 @@ class ApplianceModel:
     def _maybe_end_cycle(self, spec: ApplianceSpec, state: dict, minute: float,
                          time_delta_min: float = 5.0) -> None:
         """Decrement runtime and possibly end cycle."""
+        if not spec.deferable:
+            return  # Essentials stay on; their zero runtime is not an expiring cycle.
         if not state["is_on"]:
             return
 
