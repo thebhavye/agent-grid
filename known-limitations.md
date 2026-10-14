@@ -34,3 +34,25 @@
   share the value 5.0 with unrelated meanings; README documents
   appliance_usual_start_min as int but the actual DataFrame dtype is
   float64 (NaN forces float).
+- Twin weather cache is module-global and unbounded (no TTL): shared across
+  clients, grows on multi-location runs, and stale forecasts never refresh
+  without an explicit clear_cache().
+- DigitalTwin.simulated_minutes ignores per-tick dt (step_count * default);
+  variable-dt runs report the wrong elapsed time.
+- Default twin seed 42 always yields the evening_topup EV scenario; the
+  overnight path is only exercised via explicit-scenario tests.
+- Twin battery clamps to [0, 100] (hits 0.0 on some seeds) while the
+  generator clamps to [5, 100] + noise (floor ~4.5).
+- Twin EV holds target SOC after the 80% charge phase and gates noise on
+  charging_kw > 0; the generator ramps through the full phase with noise
+  while plugged.
+- Dead code/lint (no linter configured): unused `field` imports in
+  twin/battery/appliance models, unused `import time` in weather_client,
+  dead `prev_plugged` (ev_model), `_solar_initialized` (twin),
+  `next_cycle_start` (appliance state); `1440` hard-coded in 5 places;
+  the value 5.0 now has three unrelated meanings (battery max, legacy EV
+  fallback, twin ev_charger rating).
+- Degenerate roster edge: an ApplianceAgent with usual_start == usual_end
+  is always "outside window" and logs a missed-window event every timestep.
+- `.pytest_cache/` is not in .gitignore (untracked locally, but one
+  `git add -A` would sweep it in).
