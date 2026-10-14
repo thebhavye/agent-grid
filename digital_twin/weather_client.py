@@ -106,7 +106,11 @@ class WeatherClient:
         return (self.latitude, self.longitude, target_date.isoformat())
 
     def _is_valid_cached_profile(self, data: Any) -> bool:
-        """Check if cached data has the required weather profile structure."""
+        """Check if cached data has the required weather profile structure.
+
+        Accepts both single-day (24h) historical and multi-day (72h) forecast
+        profiles. All arrays must have the same non-zero length as "time".
+        """
         if not isinstance(data, dict):
             return False
         required_keys = {"time", "shortwave_radiation", "cloudcover", "temperature_2m", "date"}
@@ -121,11 +125,13 @@ class WeatherClient:
             return False
         if not isinstance(data["temperature_2m"], list):
             return False
-        if len(data["shortwave_radiation"]) != 24:
+        # All arrays must have same length as "time" (allows 24h historical or 72h forecast)
+        expected_len = len(data["time"])
+        if len(data["shortwave_radiation"]) != expected_len:
             return False
-        if len(data["cloudcover"]) != 24:
+        if len(data["cloudcover"]) != expected_len:
             return False
-        if len(data["temperature_2m"]) != 24:
+        if len(data["temperature_2m"]) != expected_len:
             return False
         return True
 
