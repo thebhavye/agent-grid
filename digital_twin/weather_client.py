@@ -92,11 +92,17 @@ class WeatherClient:
                 "stale-cache" (older profile remapped after a fetch
                 failure), "clear-sky-estimate" (synthetic fallback), or
                 "none" (nothing fetched yet).
+
+        Note: naive datetimes are interpreted as wall time in `timezone`
+        (Asia/Kolkata by default); aware datetimes are converted.
         """
+        try:
+            self._tz = ZoneInfo(timezone)
+        except Exception as exc:
+            raise ValueError(f"unknown timezone: {timezone!r}") from exc
         self.latitude = latitude
         self.longitude = longitude
         self.timezone = timezone
-        self._tz = ZoneInfo(timezone)
         self._session = session or requests
         self.weather_source: str = "none"
         self._cache_dir = Path(cache_dir) if cache_dir else None
@@ -154,7 +160,7 @@ class WeatherClient:
 
     def _today_in_tz(self) -> date:
         """Return today's date in the configured timezone."""
-        return datetime.now(self._tz).date()
+        return self._today()
 
     def _build_url(self, target_date: date, is_historical: bool) -> str:
         """Build the API request URL."""
@@ -172,6 +178,25 @@ class WeatherClient:
             # For forecast, we can request today + a few days
             params["forecast_days"] = 3
         return f"{base_url}?{urlencode(params)}"
+
+    def _today(self) -> date:
+        """Current date in the client's timezone (issue #28).
+
+        date.today() is host-local, which picks the wrong side of midnight
+        (and the wrong archive/forecast endpoint) for non-IST hosts.
+        """
+        return datetime.now(ZoneInfo(self.timezone)).date()
+
+    def _as_zone_naive(self, value: datetime) -> datetime:
+        """Express a datetime as naive wall time in the client's timezone.
+
+        Aware datetimes are converted (previously they crashed the
+        interpolation with TypeError); naive datetimes are assumed to
+        already be in the client's timezone and pass through unchanged.
+        """
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(ZoneInfo(self.timezone)).replace(tzinfo=None)
 
     def _fetch_from_api(self, target_date: date) -> dict:
         """Fetch weather data from Open-Meteo API."""

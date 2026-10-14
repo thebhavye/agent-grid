@@ -876,6 +876,41 @@ class TestDigitalTwin:
         assert len(rows_a) == 288 == len(rows_b)
         assert rows_a == rows_b
 
+    def test_reset_reproduces_fresh_twin(self):
+        """Issue #23: reset() restores time and RNG so output replays exactly."""
+        twin = make_test_twin(seed=7)
+        first_run = twin.run_full_day()
+        assert twin.step_count == 288
+
+        twin.reset()
+        assert twin.current_time == datetime(2024, 1, 15, 0, 0)
+        assert twin.step_count == 0
+        assert twin.run_full_day() == first_run
+
+        assert make_test_twin(seed=7).run_full_day() == first_run
+
+    def test_ev_reset_without_seed_replays_segments(self):
+        """Issue #23: EVModel.reset() reuses the original seed."""
+        from digital_twin.ev_model import EVModel
+
+        fresh = EVModel(EVModelConfig(scenario=EVScenario.OVERNIGHT, seed=7))
+        fresh.initialize_at(datetime(2024, 1, 15, 0, 0))
+        expected = [fresh.tick(5) for _ in range(12)]
+
+        fresh.reset()
+        fresh.initialize_at(datetime(2024, 1, 15, 0, 0))
+        assert [fresh.tick(5) for _ in range(12)] == expected
+
+    def test_appliance_reset_without_seed_replays_loads(self):
+        """Issue #23: ApplianceModel.reset() reuses the original seed."""
+        first = ApplianceModel(ApplianceModelConfig(seed=7))
+        first.initialize_at(datetime(2024, 1, 15, 0, 0))
+        expected = [first.tick(5)["total_load_kw"] for _ in range(24)]
+
+        first.reset()
+        first.initialize_at(datetime(2024, 1, 15, 0, 0))
+        assert [first.tick(5)["total_load_kw"] for _ in range(24)] == expected
+
     def test_overnight_load_stays_plausible(self):
         """No EV-charger double-count: max household load stays below 4 kW."""
         twin = make_test_twin()
