@@ -118,9 +118,11 @@ class WeatherClient:
                 try:
                     with open(cache_file, "r") as f:
                         data = json.load(f)
+                    if isinstance(data.get("date"), str):
+                        data["date"] = date.fromisoformat(data["date"])
                     _cache[key] = data  # Populate in-memory cache
                     return data
-                except (json.JSONDecodeError, OSError):
+                except (json.JSONDecodeError, OSError, ValueError):
                     pass
         return None
 
@@ -131,9 +133,12 @@ class WeatherClient:
         if self._cache_dir:
             cache_file = self._cache_dir / f"{key[0]}_{key[1]}_{key[2]}.json"
             try:
+                serializable = dict(data)
+                if isinstance(serializable.get("date"), date):
+                    serializable["date"] = serializable["date"].isoformat()
                 with open(cache_file, "w") as f:
-                    json.dump(data, f)
-            except OSError:
+                    json.dump(serializable, f)
+            except (OSError, TypeError):
                 pass  # Cache write failure is non-fatal
 
     def _build_url(self, target_date: date, is_historical: bool) -> str:
