@@ -113,12 +113,45 @@ class WeatherClient:
         """Generate cache key for a given date."""
         return (self.latitude, self.longitude, target_date.isoformat())
 
+    def _is_valid_cached_profile(self, data: Any) -> bool:
+        """Check if cached data has the required weather profile structure.
+
+        Accepts both single-day (24h) historical and multi-day (72h) forecast
+        profiles. All arrays must have the same non-zero length as "time".
+        """
+        if not isinstance(data, dict):
+            return False
+        required_keys = {"time", "shortwave_radiation", "cloudcover", "temperature_2m", "date"}
+        if not required_keys.issubset(data.keys()):
+            return False
+        # Validate types
+        if not isinstance(data["time"], list) or not data["time"]:
+            return False
+        if not isinstance(data["shortwave_radiation"], list):
+            return False
+        if not isinstance(data["cloudcover"], list):
+            return False
+        if not isinstance(data["temperature_2m"], list):
+            return False
+        # All arrays must have same length as "time" (allows 24h historical or 72h forecast)
+        expected_len = len(data["time"])
+        if len(data["shortwave_radiation"]) != expected_len:
+            return False
+        if len(data["cloudcover"]) != expected_len:
+            return False
+        if len(data["temperature_2m"]) != expected_len:
+            return False
+        return True
+
     def _get_cached(self, target_date: date) -> Optional[dict]:
         """Try to retrieve cached data for the given date."""
         key = self._cache_key(target_date)
         # Check in-memory cache first
         if key in _cache:
-            return _cache[key]
+            if self._is_valid_cached_profile(_cache[key]):
+                return _cache[key]
+            # Invalid structure in memory - remove it
+            del _cache[key]
         # Check file-based cache
         if self._cache_dir:
             cache_file = self._cache_dir / f"{key[0]}_{key[1]}_{key[2]}.json"
@@ -126,9 +159,14 @@ class WeatherClient:
                 try:
                     with open(cache_file, "r") as f:
                         data = json.load(f)
+                    # Validate cache structure before accepting
+                    if not self._is_valid_cached_profile(data):
+                        return None
+                    if isinstance(data.get("date"), str):
+                        data["date"] = date.fromisoformat(data["date"])
                     _cache[key] = data  # Populate in-memory cache
                     return data
-                except (json.JSONDecodeError, OSError):
+                except (json.JSONDecodeError, OSError, ValueError):
                     pass
         return None
 
@@ -139,9 +177,12 @@ class WeatherClient:
         if self._cache_dir:
             cache_file = self._cache_dir / f"{key[0]}_{key[1]}_{key[2]}.json"
             try:
+                serializable = dict(data)
+                if isinstance(serializable.get("date"), date):
+                    serializable["date"] = serializable["date"].isoformat()
                 with open(cache_file, "w") as f:
-                    json.dump(data, f)
-            except OSError:
+                    json.dump(serializable, f)
+            except (OSError, TypeError):
                 pass  # Cache write failure is non-fatal
 
     def _normalize_datetime(self, dt: datetime) -> datetime:

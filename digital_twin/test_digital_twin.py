@@ -263,6 +263,88 @@ class TestWeatherClient:
         client.get_weather(TEST_DATE)
         assert client.weather_source == "cache"
 
+    def test_file_cache_roundtrip(self, tmp_path):
+        """Issue #27: cache_dir persists across clients without refetching."""
+        client, session = _mock_client(cache_dir=str(tmp_path))
+        first = client.get_weather(TEST_DATE)
+        assert len(session.urls) == 1
+        cache_file = tmp_path / (
+            f"{client.latitude}_{client.longitude}_{TEST_DATE.isoformat()}.json"
+        )
+        assert cache_file.exists()
+
+        _cache.clear()  # force the next client onto the file cache
+        reader, reader_session = _mock_client(cache_dir=str(tmp_path))
+        second = reader.get_weather(TEST_DATE)
+        assert len(reader_session.urls) == 0
+        assert second["shortwave_radiation"] == first["shortwave_radiation"]
+        assert second["time"] == first["time"]
+        assert second["date"] == TEST_DATE
+
+    def test_corrupt_file_cache_falls_back_to_fetch(self, tmp_path):
+        """Issue #27: unreadable cache files never block a fresh fetch."""
+        client, session = _mock_client(cache_dir=str(tmp_path))
+        cache_file = tmp_path / (
+            f"{client.latitude}_{client.longitude}_{TEST_DATE.isoformat()}.json"
+        )
+        cache_file.write_text("{ not valid json")
+        data = client.get_weather(TEST_DATE)
+        assert len(session.urls) == 1
+        assert len(data["shortwave_radiation"]) == 24
+
+    def test_invalid_json_cache_structure_falls_back_to_fetch(self, tmp_path):
+        """Valid JSON with invalid profile shape is treated as a cache miss."""
+        # Test array instead of object
+        client, session = _mock_client(cache_dir=str(tmp_path))
+        cache_file = tmp_path / (
+            f"{client.latitude}_{client.longitude}_{TEST_DATE.isoformat()}.json"
+        )
+        cache_file.write_text("[]")
+        data = client.get_weather(TEST_DATE)
+        assert len(session.urls) == 1, f"expected fetch, got source={client.weather_source}"
+        assert len(data["shortwave_radiation"]) == 24
+        assert client.weather_source == "api"
+
+        # Test null - clear in-memory cache to avoid hit from previous fetch
+        _cache.clear()
+        client2, session2 = _mock_client(cache_dir=str(tmp_path))
+        cache_file.write_text("null")
+        data2 = client2.get_weather(TEST_DATE)
+        assert len(session2.urls) == 1, f"expected fetch, got source={client2.weather_source}"
+        assert len(data2["shortwave_radiation"]) == 24
+        assert client2.weather_source == "api"
+
+        # Test empty object (missing required fields)
+        _cache.clear()
+        client3, session3 = _mock_client(cache_dir=str(tmp_path))
+        cache_file.write_text("{}")
+        data3 = client3.get_weather(TEST_DATE)
+        assert len(session3.urls) == 1, f"expected fetch, got source={client3.weather_source}"
+        assert len(data3["shortwave_radiation"]) == 24
+        assert client3.weather_source == "api"
+
+        # Test object with only date (missing weather arrays)
+        _cache.clear()
+        client4, session4 = _mock_client(cache_dir=str(tmp_path))
+        cache_file.write_text('{"date": "2024-01-15"}')
+        data4 = client4.get_weather(TEST_DATE)
+        assert len(session4.urls) == 1, f"expected fetch, got source={client4.weather_source}"
+        assert len(data4["shortwave_radiation"]) == 24
+        assert client4.weather_source == "api"
+
+    def test_get_weather_for_date_convenience(self):
+        """Issue #27: the module convenience function serves the date asked."""
+        from unittest.mock import patch
+
+        from digital_twin.weather_client import get_weather_for_date
+
+        payload = _make_fake_hourly(TEST_DATE)
+        with patch("requests.get", return_value=FakeResponse(payload)):
+            data = get_weather_for_date(TEST_DATE)
+        assert data["date"] == TEST_DATE
+        assert len(data["shortwave_radiation"]) == 24
+        assert all(v is None or v >= 0 for v in data["shortwave_radiation"])
+
 
 # Timezone handling regression tests (Issue #28)
     # ---------------------------------------------------------------------------
@@ -612,6 +694,16 @@ class TestBatteryModel:
                         "stored_energy_kwh"):
                 assert math.isfinite(res[key]), f"{key}={res[key]}"
 
+    def test_degenerate_thermal_constants_stay_stable(self):
+        """Issue #27: tau_h <= 0 takes the exact-decay fallback, never NaN."""
+        for kwargs in ({"thermal_capacity": 0.0}, {"thermal_resistance": 0.0}):
+            batt = BatteryModel(BatteryModelConfig(
+                initial_soc_pct=50.0, **kwargs))
+            for _ in range(24):
+                res = batt.update(6.0, 5)
+                assert math.isfinite(res["temperature_c"])
+                assert -20.0 <= res["temperature_c"] <= 60.0
+
     def test_health_constant(self):
         batt = BatteryModel()
         h0 = batt.health_pct
@@ -861,6 +953,63 @@ class TestDigitalTwin:
         twin_dep = rows[0]["ev_departure_min"]
         twin_first_unplug = next(r["timestamp"] for r in rows if not r["ev_plugged_in"])
         assert twin_first_unplug == f"{twin_dep // 60:02d}:{twin_dep % 60:02d}"
+
+    def test_midday_scenario_full_day_edges(self):
+        """Issue #27: the MIDDAY scenario (never covered before) meets the
+        same edge contract: unplugged at midnight, plug-in inside the
+        9:00-10:30 window, and the post-charge label equals departure."""
+        client, _ = _mock_client()
+        twin = DigitalTwin(DigitalTwinConfig(
+            start_datetime=datetime(2024, 1, 15, 0, 0),
+            weather_client=client,
+            ev_config=EVModelConfig(scenario=EVScenario.MIDDAY, seed=11),
+            appliance_config=ApplianceModelConfig(seed=11),
+        ))
+        assert twin._ev.scenario == EVScenario.MIDDAY
+        rows = twin.run_full_day()
+        assert rows[0]["ev_plugged_in"] is False
+        dep = rows[0]["ev_departure_min"]
+        assert 16 * 60 <= dep <= 17 * 60 + 30
+        first_plugged = next(
+            r["timestamp"] for r in rows if r["ev_plugged_in"])
+        assert "09:00" <= first_plugged <= "10:30"
+        last_plugged_idx = max(
+            i for i, r in enumerate(rows) if r["ev_plugged_in"])
+        assert rows[last_plugged_idx + 1]["timestamp"] == (
+            f"{dep // 60:02d}:{dep % 60:02d}")
+        for row in rows:
+            assert isinstance(row["ev_plugged_in"], bool)
+            assert math.isfinite(row["ev_soc_pct"])
+            assert 0 <= row["ev_soc_pct"] <= 100
+
+    def test_fifteen_minute_timestep_stays_aligned(self):
+        """Issue #27: a non-5-minute config dt keeps labels, edges and clock
+        consistent over a full day (96 x 15-min steps)."""
+        client, _ = _mock_client()
+        twin = DigitalTwin(DigitalTwinConfig(
+            start_datetime=datetime(2024, 1, 15, 0, 0),
+            weather_client=client,
+            ev_config=EVModelConfig(scenario=EVScenario.OVERNIGHT, seed=42),
+            appliance_config=ApplianceModelConfig(seed=42),
+            time_delta_min=15.0,
+        ))
+        rows = twin.run_full_day(steps=96, time_delta_min=15.0)
+        assert len(rows) == 96
+        assert rows[0]["timestamp"] == "00:00"
+        assert rows[1]["timestamp"] == "00:15"
+        assert rows[-1]["timestamp"] == "23:45"
+        assert twin.current_time == datetime(2024, 1, 16, 0, 0)
+        assert rows[0]["ev_plugged_in"] is True
+        dep = rows[0]["ev_departure_min"]
+        # Departure need not sit on a 15-min boundary: the first unplugged
+        # label is the first tick at or past departure.
+        expected_min = ((dep + 14) // 15) * 15
+        first_unplug = next(
+            r["timestamp"] for r in rows if not r["ev_plugged_in"])
+        assert first_unplug == f"{expected_min // 60:02d}:{expected_min % 60:02d}"
+        for row in rows:
+            assert math.isfinite(row["solar_gen_kw"]) and row["solar_gen_kw"] >= 0
+            assert 0 <= row["battery_soc_pct"] <= 100
 
     def test_default_configs_are_repeatable(self):
         """Fixed default seeds: two bare-config twins give identical days."""
