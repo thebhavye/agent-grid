@@ -105,3 +105,27 @@ Why: seed=None (random.Random(None)) made every default twin a different
 day, so overnight spikes and test results were irreproducible.
 Revisit: if a "random day" mode is ever wanted, require an explicit
 seed=None opt-in rather than defaulting to it.
+
+## Issue #25 — Twin roster source for run_simulation
+Decision: use the twin-provided ApplianceModelConfig roster (converted by
+simulation/run_simulation.py:get_twin_appliances_df to the generator's
+appliance-table columns) rather than borrowing the generator's randomized
+roster or inventing a new one.
+Why: the twin already exposes an appropriate configuration/interface with
+the same 8 appliance IDs and usual windows as generate_dataset.py, so it
+is the smallest reliable fit; reusing the existing _build_agents() wiring
+keeps generator simulations unchanged.
+
+## Issue #25 (correction) — Authoritative twin EV rate is EVModelConfig
+Correction: EVAgent max_charge_kw must come from EVModelConfig.max_charge_kw
+(7.0 kW default, via get_twin_ev_max_charge_kw -> run_simulation(...,
+ev_max_charge_kw=...)), NOT the roster's ev_charger appliance_power_kw
+(5.0 kW default).
+Why: EVModel.tick() clamps simulated charging power with
+EVModelConfig.max_charge_kw (ev_model.py), while the appliance rating is
+EXCLUDED from household_load_kw (EXCLUDED_FROM_HOUSEHOLD_TOTAL) and never
+drives twin physics — the two values are not interchangeable. EVAgent
+demand scales linearly with its max, so matching the physics clamp keeps
+agent demand consistent with the twin. Custom EV configs are preserved by
+passing the twin's own ev_config through; generator datasets keep the
+legacy roster-derived default when ev_max_charge_kw is None.
