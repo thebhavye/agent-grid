@@ -89,9 +89,20 @@ class DigitalTwin:
         self._initialize_models()
 
     def _initialize_models(self) -> None:
-        """Initialize all sub-models at the start time."""
+        """Initialize all sub-models at the start time.
+
+        Sub-model clocks are rewound one step behind the twin clock: their
+        tick() advances-then-reports, so the rewind makes the first tick
+        land exactly on the labeled start time. Without this, rows carry
+        interval-end EV/appliance state under interval-start labels and
+        every transition edge (e.g. EV departure) fires one tick early
+        (issue #22). Rewound values may go slightly negative; tick()
+        wraps with % 1440.
+        """
         self._ev.initialize_at(self._current_time)
         self._appliances.initialize_at(self._current_time)
+        self._ev._current_minute -= self._time_delta_min
+        self._appliances._current_minute -= self._time_delta_min
         # Battery and solar don't need explicit initialization beyond config
 
     def _get_weather_for_current_time(self) -> tuple[float, float, float]:
