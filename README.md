@@ -93,9 +93,49 @@ an agent/allocator actually needs both — don't materialize the join in the sto
 Generator: `data/generate_dataset.py`, entry point `generate_dataset(seed=None) -> dict[str, pd.DataFrame]`.
 Sanity plot: run `python data/generate_dataset.py` directly → solar/load/EV SOC over the day.
 
-## Digital Twin (planned)
+## Digital Twin (implemented, standalone)
 
-In addition to the static synthetic dataset (data/generate_dataset.py), AgentGrid will include a live digital twin module (digital_twin/) — a tick-by-tick simulator that models the same system (solar, battery, EV, appliances) using real physics equations and real-world weather data, instead of pre-generated random curves. Solar generation is driven by live/historical weather data (Open-Meteo API, Vellore), battery behavior uses real charge/discharge physics with efficiency losses, and EV/appliance behavior remains scenario-based. Output matches the existing dataset schema exactly, so existing agents work with zero changes. This gives AgentGrid two interchangeable data sources: the static dataset for fast batch testing, and the digital twin for live, physically-grounded simulation.
+In addition to the static synthetic dataset (`data/generate_dataset.py`), AgentGrid now has a live
+digital twin module (`digital_twin/`) — a tick-by-tick simulator modelling the same system (solar,
+battery, EV, appliances). The static generator pre-computes one 24h day of random curves up front;
+the twin instead advances simulated time one `tick()` at a time, driving solar from weather data
+through physics equations and evolving battery/EV/appliance state live. Both produce the exact same
+timeseries row schema, so existing agents consume either source via `update_state(row)` with zero
+changes.
+
+Main components (`digital_twin/`):
+
+- `weather_client.py` — Open-Meteo client for Vellore, India (lat 12.97, lon 79.16); hourly
+  `shortwave_radiation` / `cloudcover` / `temperature_2m`, timezone `Asia/Kolkata`, no API key.
+  Supports historical dates (repeatable tests) plus in-memory/file caching; network layer is
+  mockable so unit tests never need internet.
+- `solar_model.py` — simplified PV physics: `power = irradiance × area × efficiency / 1000` with
+  −0.4%/°C derating above 25°C (crystalline-silicon STC assumption). Defaults: 20 m², 20%.
+- `battery_model.py` — stateful SOC with ~90% round-trip efficiency (0.949 each way), SOC clamped
+  to [0, 100], plus a deliberately simple first-order thermal model. NOT the Phase 5 PINN; health
+  stays constant in this version.
+- `ev_model.py` / `appliance_model.py` — scenario/state-based behaviour (NOT detailed electrical
+  physics), reusing the generator's scenario patterns (overnight/midday/evening-topup) as live
+  stateful models. Deterministic under a fixed seed.
+- `twin.py` — `DigitalTwin.tick(time_delta_min=5)` orchestrates all models and returns one row
+  matching the dataset schema; 288 ticks = 24 simulated hours, no wall-clock sleeping.
+
+```python
+from datetime import datetime
+from digital_twin import DigitalTwin, DigitalTwinConfig
+
+twin = DigitalTwin(DigitalTwinConfig(start_datetime=datetime(2024, 1, 15, 0, 0)))
+row = twin.tick(5)  # same keys as generate_dataset()["timeseries"] rows
+```
+
+Notes:
+
+- `simulation/run_simulation.py` is NOT wired to the twin yet — the twin stands alone; wiring is a
+  separate task.
+- Solar/battery models are simplified physics approximations, honestly documented in each
+  module's docstring — not high-fidelity models.
+- Tests: `pytest digital_twin/ -m "not live"` (offline); the single `@pytest.mark.live` smoke test
+  hits the real Open-Meteo API.
 
 ## Current Progress
 

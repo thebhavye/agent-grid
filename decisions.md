@@ -71,3 +71,37 @@ Decision: the agent-side bid is exactly
 Why: the bid is per-agent/per-timestep state; timestep ownership stays
 with the caller (which already holds the row), so stamping time inside
 the bid would duplicate caller state and invite skew.
+
+## 2026-10-06 — Digital twin model assumptions (REAL DATA vs SIMPLIFIED PHYSICS vs SCENARIO)
+Decision: digital_twin/ splits the world into three honesty tiers. REAL EXTERNAL DATA: only
+solar irradiance/cloudcover/temperature from Open-Meteo (Vellore 12.97, 79.16, Asia/Kolkata;
+variables shortwave_radiation/cloudcover/temperature_2m; historical-date + cacheable so tests are
+repeatable and offline). SIMPLIFIED PHYSICS: solar PV (20 m2, 20% efficiency, -0.4%/C above 25C
+per c-Si STC convention) and battery (12 kWh midpoint of generator's 10-14 range, 90% round-trip
+as 0.949 each way, first-order thermal decay — explicitly NOT the Phase 5 PINN, health constant).
+SCENARIO-BASED: EV (overnight/midday/evening-topup segments mirroring generate_dataset.py as live
+state) and appliances (roster + usual-window stochastic cycles, no electrical physics).
+Why: keeps the twin defensible in demos/reviews without overstating fidelity; schema-identical rows
+(tested literally against generate_dataset output) let agents consume either source unchanged, and
+ run_simulation.py stays unwired until a separate integration task.
+
+## Overnight load spike — ev_charger excluded from household_load_kw
+Decision: the appliance roster still simulates the 5 kW ev_charger (state
+visible in appliance_loads/active_appliances) but its power is excluded
+from household_load_kw totals (EXCLUDED_FROM_HOUSEHOLD_TOTAL), matching
+generate_dataset.py whose household load has no EV term.
+Why: the charger fired overnight inside its 19:00-07:00 window and stacked
+~5-7 kW onto household load while EVModel was separately charging the EV
+(PR #4 double-count) — draining the home battery to 0% before sunrise.
+After the fix the worst plausible overlap (washing_machine + pool_pump +
+base/essentials, or water_heater + base) peaks at ~3 kW; a regression
+test caps the 288-tick max below 4 kW.
+
+## Digital twin repeatability — fixed default seed 42
+Decision: EVModelConfig.seed and ApplianceModelConfig.seed default to 42
+instead of None, so a bare DigitalTwinConfig is deterministic; a test
+asserts two default-config twins produce identical 288-tick output.
+Why: seed=None (random.Random(None)) made every default twin a different
+day, so overnight spikes and test results were irreproducible.
+Revisit: if a "random day" mode is ever wanted, require an explicit
+seed=None opt-in rather than defaulting to it.
