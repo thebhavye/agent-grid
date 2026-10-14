@@ -13,6 +13,16 @@ def _require_finite(value, name):
     return result
 
 
+def _validate_supplied_finite(value, name):
+    """Validate a supplied (non-None) value is finite.
+    
+    None/missing values are allowed and handled elsewhere; this only
+    rejects explicitly provided NaN/Inf.
+    """
+    if value is not None:
+        _require_finite(value, name)
+
+
 class EVAgent(Agent):
     def __init__(self, agent_id, max_charge_kw):
         super().__init__(agent_id)
@@ -34,22 +44,34 @@ class EVAgent(Agent):
             
         ts = row.get("timestamp")
         self._current_min = None
-        if isinstance(ts, str):
+        
+        # Validate numeric timestamps before discarding (issue #26)
+        if isinstance(ts, (int, float)):
+            _validate_supplied_finite(ts, "timestamp")
+        elif isinstance(ts, str):
             try:
                 hh, mm = ts.split(":", 1)
                 self._current_min = int(hh) * 60 + int(mm)
             except (ValueError, TypeError):
                 self._current_min = None
+        # Other types (None, etc.) leave _current_min as None
 
     def get_demand_kw(self):
         if not self.ev_plugged_in:
             return 0.0
         if self.ev_soc_pct is None:
             return 0.0
+        # Validate supplied SOC even for demand calculation
+        _validate_supplied_finite(self.ev_soc_pct, "ev_soc_pct")
         gap = max(0.0, EV_TARGET_SOC_PCT - _require_finite(self.ev_soc_pct, "ev_soc_pct"))
         return self.max_charge_kw * (gap / 100.0)
 
     def compute_urgency(self):
+        # Validate supplied non-None values BEFORE early returns (issue #26)
+        _validate_supplied_finite(self.ev_soc_pct, "ev_soc_pct")
+        _validate_supplied_finite(self.ev_departure_min, "ev_departure_min")
+        _validate_supplied_finite(self._current_min, "timestamp")
+        
         if self.ev_soc_pct is None or not getattr(self, 'ev_plugged_in', False):
             return 0.0
             

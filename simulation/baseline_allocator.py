@@ -1,13 +1,3 @@
-"""Baseline power allocator.
-
-This module intentionally contains no smart/priority logic.
-It allocates available power in proportion to each agent's demand,
-capped at what each agent requested: no agent ever receives more than
-its demand. Surplus solar (available > total demand) is curtailed --
-left unallocated -- since the system models no battery-priority charging,
-export, or other surplus sink yet.
-"""
-
 import math
 
 
@@ -41,7 +31,7 @@ def allocate(available_power_kw, agent_demands):
 
     Raises:
         ValueError: If available power or any demand is NaN, infinite,
-            or negative.
+            or negative, or if total demand overflows to infinity.
     """
     available_power_kw = _require_valid_kw(available_power_kw, "available_power_kw")
     agent_demands = {
@@ -49,6 +39,13 @@ def allocate(available_power_kw, agent_demands):
         for agent_id, demand in agent_demands.items()
     }
     total_demand = sum(agent_demands.values())
+    
+    # Check for overflow (issue #26)
+    if not math.isfinite(total_demand):
+        raise ValueError(
+            f"total_demand overflowed to {total_demand!r}; "
+            f"individual demands are finite but sum is not representable"
+        )
 
     if total_demand == 0:
         return {agent_id: 0 for agent_id in agent_demands}
