@@ -597,6 +597,30 @@ class TestDigitalTwin:
         rows_b = [twin_b.tick(5) for _ in range(24)]
         assert rows_a == rows_b
 
+    def test_departure_edge_matches_generator(self):
+        """Issue #22: first-unplugged label == departure label, like the generator."""
+        from data.test_generate_dataset import _generate_overnight_tables
+
+        ots = _generate_overnight_tables(seed=1)["timeseries"]
+        gen_dep = int(ots["ev_departure_min"].iloc[0])
+        gen_labels = ots["timestamp"].tolist()
+        gen_plug = [bool(v) for v in ots["ev_plugged_in"].tolist()]
+        gen_first_unplug = next(lbl for lbl, p in zip(gen_labels, gen_plug) if not p)
+        assert gen_first_unplug == f"{gen_dep // 60:02d}:{gen_dep % 60:02d}"
+
+        client, _ = _mock_client()
+        twin = DigitalTwin(DigitalTwinConfig(
+            start_datetime=datetime(2024, 1, 15, 0, 0),
+            weather_client=client,
+            ev_config=EVModelConfig(scenario=EVScenario.OVERNIGHT, seed=1),
+            appliance_config=ApplianceModelConfig(seed=1),
+        ))
+        rows = twin.run_full_day()
+        assert rows[0]["ev_plugged_in"] is True
+        twin_dep = rows[0]["ev_departure_min"]
+        twin_first_unplug = next(r["timestamp"] for r in rows if not r["ev_plugged_in"])
+        assert twin_first_unplug == f"{twin_dep // 60:02d}:{twin_dep % 60:02d}"
+
     def test_default_configs_are_repeatable(self):
         """Fixed default seeds: two bare-config twins give identical days."""
         def _default_twin():
