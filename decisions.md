@@ -105,3 +105,38 @@ Why: seed=None (random.Random(None)) made every default twin a different
 day, so overnight spikes and test results were irreproducible.
 Revisit: if a "random day" mode is ever wanted, require an explicit
 seed=None opt-in rather than defaulting to it.
+
+## 2026-10-14 — Digital twin vs generator solar scale divergence (issue #29)
+Decision: Document the ~50% peak solar difference between the digital twin
+(default 20 m², 20% efficiency, 4 kWp nameplate) and the dataset generator
+(peak_kw ~4.5–6.0 kW actual peak). Do not recalibrate.
+
+Measured ranges across seeds 1, 7, 42:
+- Generator (data/generate_dataset.py): peak 5.35–5.73 kW, mean daylight 2.3–3.0 kW, CV 0.58–0.73
+- Digital twin (default config, mocked/clear-sky weather peaking at 800 W/m²): peak 2.78 kW, mean daylight 1.93 kW, CV 0.41
+
+Why the difference:
+- Twin models a specific physical system: 20 m² × 20% = 4.0 kWp at STC (1000 W/m², 25°C).
+  Under test/clear-sky conditions (800 W/m² peak irradiance, ~32°C ambient → ~57°C cell),
+  temperature derating (-0.4%/°C) reduces output to ~2.78 kW actual peak. This is physically
+  correct for the modeled system in Vellore January conditions.
+- Generator uses a synthetic bell curve with peak_kw ~ Uniform(4.5, 6.0) as the *actual*
+  peak output, not a nameplate rating. It represents a statistical distribution of larger
+  residential systems (≈22–30 m² at 20% efficiency) or the same system under ideal STC.
+- Cloud-dip volatility: Generator explicitly adds multiplicative cloud dips (0.3–0.7× for
+  10–30 min), giving CV ≈ 0.6–0.7. Twin relies on weather-source irradiance which includes
+  natural cloud variability; the mocked/clear-sky test profile is a smooth bell curve (CV ≈ 0.4).
+  With live Open-Meteo data, the twin would exhibit real cloud volatility.
+
+Why not recalibrate:
+- The twin's 20 m² / 20% / -0.4%/°C parameters are documented, defensible assumptions for a
+  specific residential system (see digital_twin/solar_model.py:20-27 and decisions.md:75-83).
+  Changing them to match the generator's synthetic peak would undermine the twin's "physically
+  grounded" design principle and its value for demos/faculty review.
+- The two sources serve different purposes: generator = fast, statistical, CI-friendly; twin =
+  realistic, physics-based, defensible. Schema identity (same row keys/types) is the contract
+  for agent compatibility, not value-range identity.
+- Users needing a larger system can configure SolarModelConfig(panel_area_m2=30.0) or similar
+  without changing defaults.
+
+Revisit: if agent logic is found to implicitly depend on a specific solar peak range.
