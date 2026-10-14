@@ -25,6 +25,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -91,7 +92,14 @@ class WeatherClient:
                 "stale-cache" (older profile remapped after a fetch
                 failure), "clear-sky-estimate" (synthetic fallback), or
                 "none" (nothing fetched yet).
+
+        Note: naive datetimes are interpreted as wall time in `timezone`
+        (Asia/Kolkata by default); aware datetimes are converted.
         """
+        try:
+            ZoneInfo(timezone)
+        except Exception as exc:
+            raise ValueError(f"unknown timezone: {timezone!r}") from exc
         self.latitude = latitude
         self.longitude = longitude
         self.timezone = timezone
@@ -153,9 +161,28 @@ class WeatherClient:
             params["forecast_days"] = 3
         return f"{base_url}?{urlencode(params)}"
 
+    def _today(self) -> date:
+        """Current date in the client's timezone (issue #28).
+
+        date.today() is host-local, which picks the wrong side of midnight
+        (and the wrong archive/forecast endpoint) for non-IST hosts.
+        """
+        return datetime.now(ZoneInfo(self.timezone)).date()
+
+    def _as_zone_naive(self, value: datetime) -> datetime:
+        """Express a datetime as naive wall time in the client's timezone.
+
+        Aware datetimes are converted (previously they crashed the
+        interpolation with TypeError); naive datetimes are assumed to
+        already be in the client's timezone and pass through unchanged.
+        """
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(ZoneInfo(self.timezone)).replace(tzinfo=None)
+
     def _fetch_from_api(self, target_date: date) -> dict:
         """Fetch weather data from Open-Meteo API."""
-        today = date.today()
+        today = self._today()
         is_historical = target_date < today
 
         url = self._build_url(target_date, is_historical)

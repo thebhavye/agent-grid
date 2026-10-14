@@ -240,11 +240,18 @@ class ApplianceModel:
         return self._appliance_states.get(appliance_id)
 
     def reset(self, seed: Optional[int] = None) -> None:
-        """Reset to initial state."""
-        if seed is not None:
-            self._rng = random.Random(seed)
+        """Reset to initial state.
+
+        With no argument the original config seed is reused, so the reset
+        model replays identically to a freshly constructed one (issue #23).
+        Pass a seed to re-seed with a different stream instead. (A model
+        originally built with seed=None cannot replay deterministically.)
+        """
+        # Use provided seed, or fall back to original config seed for exact replay
+        effective_seed = seed if seed is not None else self.config.seed
+        self._rng = random.Random(effective_seed)
         self.__init__(ApplianceModelConfig(
-            seed=seed,
+            seed=effective_seed,
             appliances=self.config.appliances,
             base_load_kw=self.config.base_load_kw,
         ))
