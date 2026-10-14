@@ -11,7 +11,7 @@ This repository is private pending a planned patent filing.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Urgency-scoring agents | DONE |
-| 2 | LangGraph multi-agent bidding + arbiter | not started |
+| 2 | LangGraph multi-agent bidding + arbiter | Prep: `get_bid()` contract merged; LangGraph bidding + arbiter pending |
 | 3 | 24h synthetic dataset + baseline eval | DONE |
 | 4 | LLM-generated allocation explanations | not started |
 | 5 | PINN for battery SoH/thermal risk | not started |
@@ -20,11 +20,27 @@ This repository is private pending a planned patent filing.
 
 ## Running tests
 
+From the repository root (CI uses Python 3.13):
+
+```bash
+python -m pip install -r requirements.txt
+python -m pytest . -m "not live"
+```
+
+`-m "not live"` excludes tests marked `live`, which call the external weather
+API. CI runs this offline suite on pushes and pull requests targeting `main`.
+
+To run only the Digital Twin tests:
+
+```bash
+python -m pytest digital_twin/ -v -m "not live"
+```
+
+Optional diagnostic scripts (the dataset smoke script also runs within the full suite):
+
 ```bash
 python -m agents.test_agents
 python -m data.test_generate_dataset
-python -m pytest test_baseline.py -v
-python -m pytest test_simulation.py -v
 ```
 
 ## Generating the dataset
