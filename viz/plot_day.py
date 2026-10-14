@@ -59,11 +59,12 @@ def plot_day(seed=42, save_path="day_plot.png"):
 
         axes[2].plot(minutes, ts["battery_soc_pct"], color="seagreen", label="Battery SOC")
         axes[2].plot(minutes, ts["ev_soc_pct"], color="mediumpurple", label="EV SOC")
-        # Extend the final interval so shading covers each full five-minute step.
-        axes[2].fill_between(
-            np.append(minutes, minutes[-1] + STEP_MIN), 0, 100,
-            where=np.append(ts["ev_plugged_in"].to_numpy(), ts["ev_plugged_in"].iloc[-1]),
-            step="post", color="mediumpurple", alpha=0.15, label="EV plugged in",
+        # Each row's plug-in state covers the following five-minute interval.
+        axes[2].stairs(
+            ts["ev_plugged_in"].to_numpy(dtype=float) * 100,
+            np.append(minutes, minutes[-1] + STEP_MIN),
+            baseline=0, fill=True, linewidth=0,
+            color="mediumpurple", alpha=0.15, label="EV plugged in",
         )
         axes[2].set_title("State of charge (static dataset; not allocation feedback)")
         axes[2].set_ylabel("SOC (%)")
