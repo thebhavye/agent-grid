@@ -57,12 +57,13 @@ class EVAgent(Agent):
         # Other types (None, etc.) leave _current_min as None
 
     def get_demand_kw(self):
+        # Validate supplied SOC before early returns (issue #26)
+        _validate_supplied_finite(self.ev_soc_pct, "ev_soc_pct")
+
         if not self.ev_plugged_in:
             return 0.0
         if self.ev_soc_pct is None:
             return 0.0
-        # Validate supplied SOC even for demand calculation
-        _validate_supplied_finite(self.ev_soc_pct, "ev_soc_pct")
         gap = max(0.0, EV_TARGET_SOC_PCT - _require_finite(self.ev_soc_pct, "ev_soc_pct"))
         return self.max_charge_kw * (gap / 100.0)
 
