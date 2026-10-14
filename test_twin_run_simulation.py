@@ -161,7 +161,19 @@ def test_charger_required_without_ev_override(roster):
         rs._build_agents(roster)
 
 
-@pytest.mark.parametrize("ev_limit", [0, -1, float("nan"), float("inf")])
-def test_invalid_ev_override_rejected(ev_limit):
+@pytest.mark.parametrize("roster", [None, []], ids=["legacy", "empty-roster"])
+@pytest.mark.parametrize("ev_limit", [0, -1, float("nan"), float("inf"), float("-inf"), "invalid"])
+def test_invalid_ev_override_rejected(roster, ev_limit):
     with pytest.raises(ValueError, match="EV charging rate"):
-        rs._build_agents([], ev_max_charge_kw=ev_limit)
+        rs._build_agents(roster, ev_max_charge_kw=ev_limit)
+
+
+def test_legacy_rows_honor_explicit_ev_override():
+    demands_seen = []
+
+    def capture(available, demands):
+        demands_seen.append(demands)
+        return allocate(available, demands)
+
+    rs.run_simulation([{"ev_soc_pct": 50.0}], capture, ev_max_charge_kw=11.0)
+    assert demands_seen[0]["ev_1"] == 5.5

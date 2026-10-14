@@ -167,10 +167,17 @@ def _build_agents(appliances_df, ev_max_charge_kw=None):
     power ratings. An empty roster or one without ev_charger is allowed
     only with an explicit positive finite EV rate. Unsupported roster
     types raise TypeError; invalid records raise ValueError. Only
-    appliances_df=None takes the legacy no-roster path which uses
-    LEGACY_EV_MAX_CHARGE_KW_FALLBACK explicitly."""
+    appliances_df=None takes the legacy no-roster path, using
+    LEGACY_EV_MAX_CHARGE_KW_FALLBACK when no EV override is supplied."""
     solar = SolarAgent("solar_1")
     battery = BatteryAgent("battery_1")
+    if ev_max_charge_kw is not None:
+        try:
+            ev_max_charge_kw = float(ev_max_charge_kw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("EV charging rate must be a positive finite number.") from exc
+        if not math.isfinite(ev_max_charge_kw) or ev_max_charge_kw <= 0:
+            raise ValueError("EV charging rate must be a positive finite number.")
     roster = _coerce_roster_records(appliances_df)
     if roster is not None:
         seen_ids = set()
@@ -226,7 +233,10 @@ def _build_agents(appliances_df, ev_max_charge_kw=None):
         agents = [
             solar,
             battery,
-            EVAgent("ev_1", max_charge_kw=LEGACY_EV_MAX_CHARGE_KW_FALLBACK),
+            EVAgent("ev_1", max_charge_kw=(
+                ev_max_charge_kw if ev_max_charge_kw is not None
+                else LEGACY_EV_MAX_CHARGE_KW_FALLBACK
+            )),
             ApplianceAgent("appliance_1"),
         ]
     return agents
