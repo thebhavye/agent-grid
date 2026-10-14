@@ -1,5 +1,7 @@
 """Timestep-based simulation runner (real agents, no hardcoded demands)."""
 
+import math
+
 from agents.appliance_agent import ApplianceAgent
 from agents.battery_agent import BatteryAgent
 from agents.ev_agent import EVAgent
@@ -36,8 +38,8 @@ def get_twin_appliances_df(appliance_config=None):
     appliance_power_kw (5.0 kW default) is only the charger's display
     rating — it is EXCLUDED from household_load_kw and does NOT clamp
     twin charging. The authoritative EV rate is EVModelConfig.max_charge_kw
-    (see get_twin_ev_max_charge_kw); pass it as ev_max_charge_kw so the
-    EVAgent matches twin physics.
+    (see get_twin_ev_max_charge_kw). Prefer run_twin_simulation(twin,
+    allocator), which obtains both settings from the same twin instance.
     """
     from digital_twin.appliance_model import ApplianceModelConfig
 
@@ -56,7 +58,7 @@ def get_twin_appliances_df(appliance_config=None):
         }
         for spec in appliance_config.appliances
     ]
-    return pd.DataFrame(records)[TWIN_APPLIANCE_COLUMNS]
+    return pd.DataFrame(records, columns=TWIN_APPLIANCE_COLUMNS)
 
 
 def get_twin_ev_max_charge_kw(ev_config=None):
@@ -87,12 +89,17 @@ def _coerce_roster_records(appliances_df):
         return None
     if hasattr(appliances_df, "to_dict"):
         try:
-            return appliances_df.to_dict(orient="records")
+            records = appliances_df.to_dict(orient="records")
         except Exception as exc:
             raise TypeError(
                 "appliances roster with to_dict() could not be converted "
                 "to records; expected a DataFrame."
             ) from exc
+        if not isinstance(records, list) or not all(isinstance(row, dict) for row in records):
+            raise TypeError("appliances roster must convert to a list of row dicts.")
+        if len(records) != len(appliances_df):
+            raise ValueError("appliances roster contains rows without appliance fields.")
+        return records
     if isinstance(appliances_df, (list, tuple)):
         if all(isinstance(entry, dict) for entry in appliances_df):
             return list(appliances_df)
@@ -108,7 +115,7 @@ def _coerce_roster_records(appliances_df):
                 continue
             records.append(
                 {
-                    "appliance_id": getattr(spec, "appliance_id", "unknown"),
+                    "appliance_id": getattr(spec, "appliance_id", None),
                     "appliance_priority": getattr(spec, "priority", None),
                     "appliance_deferable": getattr(spec, "deferable", False),
                     "appliance_power_kw": getattr(spec, "power_kw", None),
@@ -156,14 +163,30 @@ def _build_agents(appliances_df, ev_max_charge_kw=None):
     ev_max_charge_kw overrides it — the twin path must pass
     EVModelConfig.max_charge_kw (via get_twin_ev_max_charge_kw) since
     that value clamps twin charging while the roster rating does not.
-    A non-None roster of an unsupported type raises TypeError; a valid
-    roster missing the ev_charger row raises ValueError; only
+    Supplied rows must have unique nonempty IDs and finite nonnegative
+    power ratings. An empty roster or one without ev_charger is allowed
+    only with an explicit positive finite EV rate. Unsupported roster
+    types raise TypeError; invalid records raise ValueError. Only
     appliances_df=None takes the legacy no-roster path which uses
     LEGACY_EV_MAX_CHARGE_KW_FALLBACK explicitly."""
     solar = SolarAgent("solar_1")
     battery = BatteryAgent("battery_1")
     roster = _coerce_roster_records(appliances_df)
     if roster is not None:
+        seen_ids = set()
+        for entry in roster:
+            aid = entry.get("appliance_id")
+            if not isinstance(aid, str) or not aid.strip():
+                raise ValueError("appliances roster requires a nonempty appliance_id.")
+            if aid in seen_ids:
+                raise ValueError(f"appliances roster contains duplicate appliance_id: {aid}")
+            seen_ids.add(aid)
+            try:
+                power = float(entry.get("appliance_power_kw"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"appliances roster requires numeric appliance_power_kw for {aid}.") from exc
+            if not math.isfinite(power) or power < 0:
+                raise ValueError(f"appliances roster requires finite nonnegative appliance_power_kw for {aid}.")
         if ev_max_charge_kw is not None:
             ev_power = ev_max_charge_kw
         else:
@@ -172,14 +195,20 @@ def _build_agents(appliances_df, ev_max_charge_kw=None):
                 if entry.get("appliance_id") == "ev_charger":
                     ev_power = entry.get("appliance_power_kw")
                     break
-        if ev_power is None or ev_power != ev_power:
+        if ev_power is None:
             raise ValueError(
                 "appliances roster missing ev_charger row or its "
                 "appliance_power_kw; cannot construct EVAgent."
             )
-        agents = [solar, battery, EVAgent("ev_1", max_charge_kw=float(ev_power))]
+        try:
+            ev_power = float(ev_power)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("EV charging rate must be a positive finite number.") from exc
+        if not math.isfinite(ev_power) or ev_power <= 0:
+            raise ValueError("EV charging rate must be a positive finite number.")
+        agents = [solar, battery, EVAgent("ev_1", max_charge_kw=ev_power)]
         for entry in roster:
-            aid = entry.get("appliance_id", "unknown")
+            aid = entry["appliance_id"]
             if aid == "ev_charger":
                 continue  # already handled by EVAgent above; avoid double-counting the same physical charger
             agents.append(
@@ -188,7 +217,7 @@ def _build_agents(appliances_df, ev_max_charge_kw=None):
                     appliance_id=aid,
                     appliance_priority=entry.get("appliance_priority"),
                     appliance_deferable=entry.get("appliance_deferable", False),
-                    appliance_power_kw=entry.get("appliance_power_kw"),
+                    appliance_power_kw=float(entry["appliance_power_kw"]),
                     appliance_usual_start_min=entry.get("appliance_usual_start_min"),
                     appliance_usual_end_min=entry.get("appliance_usual_end_min"),
                 )
@@ -214,7 +243,8 @@ def run_simulation(dataset, allocator, appliances_df=None, ev_max_charge_kw=None
     The allocator is passed as an argument so the baseline can later be
     replaced by a smarter allocation strategy without changing this loop.
     ev_max_charge_kw optionally overrides the roster's ev_charger rating
-    for the EVAgent; twin callers should pass get_twin_ev_max_charge_kw().
+    for the EVAgent. Twin callers should prefer run_twin_simulation so
+    the roster and EV rate are taken from the same configured twin.
     """
     rows, resolved_appliances_df = _normalize_inputs(dataset, appliances_df)
     agents = _build_agents(resolved_appliances_df, ev_max_charge_kw=ev_max_charge_kw)
@@ -232,6 +262,22 @@ def run_simulation(dataset, allocator, appliances_df=None, ev_max_charge_kw=None
         results.append(allocation)
 
     return results
+
+
+def run_twin_simulation(twin, allocator):
+    """Advance a twin by 288 configured timesteps and allocate its solar.
+
+    Uses the actual appliance and EV model configurations from this twin,
+    including defaults resolved by the models and custom charging rates.
+    At the default five-minute step this covers one day. Allocations do
+    not feed back into the twin's state.
+    """
+    appliances_df = get_twin_appliances_df(twin._appliances.config)
+    ev_max_charge_kw = get_twin_ev_max_charge_kw(twin._ev.config)
+    return run_simulation(
+        twin.run_full_day(), allocator,
+        appliances_df=appliances_df, ev_max_charge_kw=ev_max_charge_kw,
+    )
 
 
 if __name__ == "__main__":
