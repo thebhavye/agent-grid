@@ -62,9 +62,14 @@ class DigitalTwin:
         if config.start_datetime is None:
             raise ValueError("start_datetime is required")
 
+        # Store original start datetime for reset()
+        self._start_datetime = config.start_datetime
         self._current_time = config.start_datetime
         self._time_delta_min = config.time_delta_min
         self._step_count = 0
+
+        # Store weather date override for reset()
+        self._weather_date_override = config.weather_date_override
 
         # Initialize weather client
         self._weather_client = config.weather_client or WeatherClient()
@@ -216,9 +221,18 @@ class DigitalTwin:
 
     def reset(self, start_datetime: Optional[datetime] = None) -> None:
         """Reset twin to initial state."""
-        if start_datetime is not None:
-            self._current_time = start_datetime
+        # Reset to original start datetime unless a new one is provided
+        self._current_time = start_datetime if start_datetime is not None else self._start_datetime
         self._step_count = 0
+        # Recompute weather anchor: use override if configured, else the (new) start date
+        self._weather_date = (
+            self._weather_date_override.date()
+            if self._weather_date_override
+            else self._current_time.date()
+        )
+        # Fully reset sub-models (RNG state + internal state)
+        self._ev.reset()
+        self._appliances.reset()
         self._initialize_models()
         # Re-initialize battery to config defaults
         self._battery = BatteryModel(self._battery.config)

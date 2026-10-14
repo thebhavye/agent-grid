@@ -277,11 +277,12 @@ class EVModel:
 
     def reset(self, seed: Optional[int] = None) -> None:
         """Reset EV to initial state with optional new seed."""
-        if seed is not None:
-            self._rng = random.Random(seed)
+        # Use provided seed, or fall back to original config seed for exact replay
+        effective_seed = seed if seed is not None else self.config.seed
+        self._rng = random.Random(effective_seed)
         self.__init__(EVModelConfig(
-            scenario=self._scenario,
-            seed=seed,
+            scenario=self.config.scenario,
+            seed=effective_seed,
             battery_capacity_kwh=self.config.battery_capacity_kwh,
             max_charge_kw=self.config.max_charge_kw,
             charge_efficiency=self.config.charge_efficiency,
