@@ -48,13 +48,14 @@ class EVModelConfig:
 
     Attributes:
         scenario: EVScenario or None for random.
-        seed: Random seed for deterministic behavior.
+        seed: Random seed for deterministic behavior. Default 42 so bare
+              DigitalTwinConfig defaults are repeatable.
         battery_capacity_kwh: EV battery capacity (kWh). Default 60 kWh.
         max_charge_kw: Maximum charge power (kW). Default 7.0 kW.
         charge_efficiency: Charging efficiency (0-1). Default 0.90.
     """
     scenario: Optional[EVScenario] = None
-    seed: Optional[int] = None
+    seed: Optional[int] = 42
     battery_capacity_kwh: float = 60.0
     max_charge_kw: float = 7.0
     charge_efficiency: float = 0.90
@@ -74,7 +75,8 @@ class EVModel:
     def __init__(self, config: Optional[EVModelConfig] = None):
         """
         Args:
-            config: EVModelConfig instance. If None, uses defaults with random scenario.
+            config: EVModelConfig instance. If None, uses defaults
+                    (deterministic default seed 42).
         """
         self.config = config or EVModelConfig()
         self._rng = random.Random(self.config.seed)

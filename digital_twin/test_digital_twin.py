@@ -10,8 +10,10 @@ Run everything (requires internet) with:
     pytest digital_twin/ -v
 """
 
+import logging
 import math
 from datetime import date, datetime, timedelta
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -77,6 +79,27 @@ class FakeSession:
     def get(self, url, timeout=30):
         self.urls.append(url)
         return FakeResponse(self._payload)
+
+
+class DateAwareFakeSession:
+    """Mock session serving a per-date payload based on the request URL.
+
+    Parses the archive `start_date` query param; forecast URLs (no date
+    param) fall back to TEST_DATE. Records every requested URL.
+    """
+
+    def __init__(self, payloads: dict):
+        self._payloads = payloads
+        self.urls = []
+
+    def get(self, url, timeout=30):
+        self.urls.append(url)
+        query = parse_qs(urlparse(url).query)
+        if "start_date" in query:
+            key = date.fromisoformat(query["start_date"][0])
+        else:
+            key = TEST_DATE
+        return FakeResponse(self._payloads[key])
 
 
 @pytest.fixture(autouse=True)
@@ -160,21 +183,45 @@ class TestWeatherClient:
         with pytest.raises(ValueError, match="missing required hourly keys"):
             client.get_weather(date(2024, 2, 2))
 
-    def test_negative_irradiance_rejected(self):
+    def test_negative_irradiance_clamped_with_warning(self, caplog):
         payload = _make_fake_hourly()
         payload["hourly"]["shortwave_radiation"][12] = -5.0
         client, _ = _mock_client()
         client._session = FakeSession(payload=payload)
-        with pytest.raises(ValueError, match="Negative irradiance"):
-            client.get_weather(date(2024, 2, 3))
+        with caplog.at_level(logging.WARNING):
+            data = client.get_weather(date(2024, 2, 3))
+        assert data["shortwave_radiation"][12] == 0.0
+        assert "irradiance" in caplog.text.lower()
+        assert all(v is None or v >= 0 for v in data["shortwave_radiation"])
 
-    def test_cloudcover_out_of_range_rejected(self):
+    def test_cloudcover_out_of_range_clamped_with_warning(self, caplog):
         payload = _make_fake_hourly()
         payload["hourly"]["cloudcover"][3] = 150.0
+        payload["hourly"]["cloudcover"][7] = -20.0
         client, _ = _mock_client()
         client._session = FakeSession(payload=payload)
-        with pytest.raises(ValueError, match="Cloud cover out of range"):
-            client.get_weather(date(2024, 2, 4))
+        with caplog.at_level(logging.WARNING):
+            data = client.get_weather(date(2024, 2, 4))
+        assert data["cloudcover"][3] == 100.0
+        assert data["cloudcover"][7] == 0.0
+        assert "cloud cover" in caplog.text.lower()
+        assert all(v is None or 0 <= v <= 100 for v in data["cloudcover"])
+
+    def test_single_bad_hour_does_not_block_day(self):
+        payload = _make_fake_hourly()
+        good_irradiance_6 = payload["hourly"]["shortwave_radiation"][6]
+        payload["hourly"]["shortwave_radiation"][5] = -3.0
+        payload["hourly"]["cloudcover"][7] = 150.0
+        client, _ = _mock_client()
+        client._session = FakeSession(payload=payload)
+        data = client.get_weather(date(2024, 2, 5))
+        assert len(data["shortwave_radiation"]) == 24
+        assert len(data["cloudcover"]) == 24
+        assert len(data["temperature_2m"]) == 24
+        # Bad hours clamped, good hours untouched.
+        assert data["shortwave_radiation"][5] == 0.0
+        assert data["cloudcover"][7] == 100.0
+        assert data["shortwave_radiation"][6] == good_irradiance_6
 
     @pytest.mark.live
     def test_live_api_smoke(self):
@@ -183,17 +230,37 @@ class TestWeatherClient:
         Skipped (not failed) when there is no network access, so CI without
         internet never depends on this test.
         """
-        import requests as _requests
-
         client = WeatherClient()  # real network session
         past = date.today() - timedelta(days=10)
-        try:
-            data = client.get_weather(past)
-        except _requests.RequestException as exc:
-            pytest.skip(f"no network access for live smoke test: {exc}")
+        data = client.get_weather(past)
+        if client.weather_source != "api":
+            pytest.skip(
+                "no network access for live smoke test "
+                f"(weather_source={client.weather_source})"
+            )
+        assert client.weather_source == "api"
         assert len(data["shortwave_radiation"]) >= 24
         assert all(v is not None and v >= 0 for v in data["shortwave_radiation"])
         assert all(v is not None and 0 <= v <= 100 for v in data["cloudcover"])
+
+    def test_temperature_outlier_clamped_with_warning(self, caplog):
+        payload = _make_fake_hourly()
+        payload["hourly"]["temperature_2m"][14] = 99.0
+        client, _ = _mock_client()
+        client._session = FakeSession(payload=payload)
+        with caplog.at_level(logging.WARNING):
+            data = client.get_weather(date(2024, 2, 6))
+        assert data["temperature_2m"][14] == 60.0
+        assert "temperature" in caplog.text.lower()
+        assert all(v is None or -20 <= v <= 60 for v in data["temperature_2m"])
+
+    def test_weather_source_tracks_provenance(self):
+        client, session = _mock_client()
+        assert client.weather_source == "none"
+        client.get_weather(TEST_DATE)
+        assert client.weather_source == "api"
+        client.get_weather(TEST_DATE)
+        assert client.weather_source == "cache"
 
 
 # ---------------------------------------------------------------------------
@@ -410,12 +477,156 @@ class TestDigitalTwin:
         twin.tick(5)
         assert twin.current_time - t0 == timedelta(minutes=5)
 
+    def test_timestamps_sample_and_label_at_start_time(self):
+        """Fix 1: rows are sampled AND labeled at the interval start."""
+        start = datetime(2024, 1, 15, 0, 0)
+        twin = make_test_twin(start=start)
+        rows = twin.run_full_day()
+        assert len(rows) == 288
+        assert rows[0]["timestamp"] == "00:00"
+        assert rows[-1]["timestamp"] == "23:55"
+        assert twin.current_time == start + timedelta(hours=24)
+
+    def test_weather_date_override_selects_data_source(self):
+        """Fix 2: the override date (not the start date) picks the data."""
+        payloads = {
+            date(2024, 1, 15): _make_fake_hourly(date(2024, 1, 15), peak_irradiance=800.0),
+            date(2024, 1, 20): _make_fake_hourly(date(2024, 1, 20), peak_irradiance=100.0),
+        }
+        start = datetime(2024, 1, 15, 12, 0)  # midday: solar separates the peaks
+
+        def _twin_at_noon(**overrides):
+            session = DateAwareFakeSession(payloads)
+            client = WeatherClient(session=session)
+            kwargs = dict(
+                start_datetime=start,
+                weather_client=client,
+                ev_config=EVModelConfig(scenario=EVScenario.OVERNIGHT, seed=42),
+                appliance_config=ApplianceModelConfig(seed=42),
+            )
+            kwargs.update(overrides)
+            return DigitalTwin(DigitalTwinConfig(**kwargs)), session
+
+        plain_twin, plain_session = _twin_at_noon()
+        plain_row = plain_twin.tick(5)
+        assert "2024-01-15" in plain_session.urls[0]
+
+        over_twin, over_session = _twin_at_noon(
+            weather_date_override=datetime(2024, 1, 20, 0, 0)
+        )
+        over_row = over_twin.tick(5)
+        assert "2024-01-20" in over_session.urls[0]
+
+        # 100 W/m² peak vs 800 W/m² peak: override row must be much smaller.
+        assert over_row["solar_gen_kw"] > 0
+        assert over_row["solar_gen_kw"] < plain_row["solar_gen_kw"] / 2
+
+    def test_tick_survives_api_failure_with_clear_sky_fallback(self, caplog):
+        """Fix 3: RequestException -> warning + deterministic estimate row."""
+        import requests as _requests
+
+        class FailingSession:
+            def get(self, url, timeout=30):
+                raise _requests.RequestException("simulated outage")
+
+        client = WeatherClient(session=FailingSession())
+        twin = DigitalTwin(DigitalTwinConfig(
+            start_datetime=datetime(2024, 1, 15, 12, 0),
+            weather_client=client,
+            ev_config=EVModelConfig(scenario=EVScenario.OVERNIGHT, seed=42),
+            appliance_config=ApplianceModelConfig(seed=42),
+        ))
+        with caplog.at_level(logging.WARNING):
+            row = twin.tick(5)
+        assert "clear-sky" in caplog.text
+        # Valid row: finite values, midday estimate gives real solar.
+        assert math.isfinite(row["solar_gen_kw"]) and row["solar_gen_kw"] > 0
+        assert math.isfinite(row["household_load_kw"]) and row["household_load_kw"] >= 0
+        assert 0 <= row["battery_soc_pct"] <= 100
+        assert 0 <= row["ev_soc_pct"] <= 100
+        assert isinstance(row["ev_departure_min"], int)
+        assert isinstance(row["ev_plugged_in"], bool)
+
+    def test_api_failure_uses_stale_cache(self, caplog):
+        """Fix 3 (stale leg): a cached profile is remapped onto the new date."""
+        import requests as _requests
+
+        client, _ = _mock_client()
+        cached = client.get_weather(TEST_DATE)
+        assert len(client._session.urls) == 1
+
+        class FailingSession:
+            def get(self, url, timeout=30):
+                raise _requests.RequestException("simulated outage")
+
+        client._session = FailingSession()
+        other_day = date(2024, 1, 16)
+        with caplog.at_level(logging.WARNING):
+            data = client.get_weather(other_day)
+        assert "stale" in caplog.text.lower()
+        # Remapped onto the requested date, values preserved.
+        assert data["date"] == other_day
+        assert all(t.startswith("2024-01-16T") for t in data["time"])
+        assert data["shortwave_radiation"] == cached["shortwave_radiation"]
+
+    def test_multiday_rollover_reuses_weather_profile(self):
+        """Fix 4: past tick 288 the day-1 profile repeats; no new fetches."""
+        client, session = _mock_client()
+        twin = DigitalTwin(DigitalTwinConfig(
+            start_datetime=datetime(2024, 1, 15, 0, 0),
+            weather_client=client,
+            ev_config=EVModelConfig(scenario=EVScenario.OVERNIGHT, seed=42),
+            appliance_config=ApplianceModelConfig(seed=42),
+        ))
+        rows = [twin.tick(5) for _ in range(600)]
+        assert len(rows) == 600
+        # Day 2 starts over at midnight with zero night solar ...
+        assert rows[288]["timestamp"] == "00:00"
+        assert rows[288]["solar_gen_kw"] == 0.0
+        # ... and repeats midday sun (tick 432 == start + 36h == day-2 noon).
+        assert rows[432]["timestamp"] == "12:00"
+        assert rows[432]["solar_gen_kw"] > 1.0
+        assert rows[432]["solar_gen_kw"] == pytest.approx(rows[144]["solar_gen_kw"])
+        # Weather for the day was fetched once; rollover caused no refetch.
+        assert len(session.urls) == 1, f"expected 1 request, got {len(session.urls)}"
+
     def test_deterministic_with_seed(self):
         twin_a = make_test_twin(seed=7)
         twin_b = make_test_twin(seed=7)
         rows_a = [twin_a.tick(5) for _ in range(24)]
         rows_b = [twin_b.tick(5) for _ in range(24)]
         assert rows_a == rows_b
+
+    def test_default_configs_are_repeatable(self):
+        """Fixed default seeds: two bare-config twins give identical days."""
+        def _default_twin():
+            client, _ = _mock_client()
+            return DigitalTwin(DigitalTwinConfig(
+                start_datetime=datetime(2024, 1, 15, 0, 0),
+                weather_client=client,
+            ))
+
+        rows_a = _default_twin().run_full_day()
+        rows_b = _default_twin().run_full_day()
+        assert len(rows_a) == 288 == len(rows_b)
+        assert rows_a == rows_b
+
+    def test_overnight_load_stays_plausible(self):
+        """No EV-charger double-count: max household load stays below 4 kW."""
+        twin = make_test_twin()
+        rows = twin.run_full_day()
+        peak = max(r["household_load_kw"] for r in rows)
+        assert peak < 4.0, f"implausible overnight/daytime peak: {peak} kW"
+
+    def test_battery_not_pinned_at_zero_overnight(self):
+        """Battery SOC sits at 0 for at most 6 consecutive ticks."""
+        twin = make_test_twin()
+        rows = twin.run_full_day()
+        worst_run = current = 0
+        for r in rows:
+            current = current + 1 if r["battery_soc_pct"] == 0 else 0
+            worst_run = max(worst_run, current)
+        assert worst_run <= 6, f"battery pinned at 0 for {worst_run} ticks"
 
     def test_existing_agents_accept_twin_row(self):
         """Integration contract: twin rows feed update_state() with NO agent changes."""

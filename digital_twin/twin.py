@@ -7,7 +7,7 @@ The DigitalTwin.tick() advances simulation by one timestep and returns
 a dict with the same keys as data/generate_dataset.py timeseries rows.
 
 Usage:
-    twin = DigitalTwin(start_datetime=datetime(2024, 1, 15, 0, 0))
+    twin = DigitalTwin(DigitalTwinConfig(start_datetime=datetime(2024, 1, 15, 0, 0)))
     for _ in range(288):  # 24 hours at 5-min resolution
         row = twin.tick(5)
         # row has: solar_gen_kw, battery_soc_pct, battery_health_pct,
@@ -47,8 +47,10 @@ class DigitalTwinConfig:
 class DigitalTwin:
     """Main digital twin orchestrator.
 
-    Each tick() advances simulated time by time_delta_min and returns
-    a row dict matching the generate_dataset.py timeseries schema.
+    Each tick() returns the row for the current timestep (interval start)
+    and then advances simulated time by time_delta_min, so a twin started
+    at 00:00 emits 00:00, 00:05, ..., 23:55 for a full day. Returned rows
+    match the generate_dataset.py timeseries schema.
     """
 
     def __init__(self, config: DigitalTwinConfig):
@@ -66,6 +68,10 @@ class DigitalTwin:
 
         # Initialize weather client
         self._weather_client = config.weather_client or WeatherClient()
+        # Anchor date for the weather profile. Multi-day runs reuse this
+        # single day's profile (time-of-day lookup) instead of issuing a
+        # new network request per simulated date, consistent with EV and
+        # appliances which already repeat their day-1 pattern.
         self._weather_date = (
             config.weather_date_override.date()
             if config.weather_date_override
@@ -91,16 +97,26 @@ class DigitalTwin:
     def _get_weather_for_current_time(self) -> tuple[float, float, float]:
         """Get weather data for current simulation time.
 
+        The anchor date (start date, or weather_date_override when set) is
+        combined with the current time-of-day, so the override actually
+        selects which date's data is used and multi-day runs reuse the
+        same daily profile instead of fetching new dates mid-run.
+
         Returns:
             Tuple of (irradiance_w_m2, temperature_c, cloudcover_pct)
         """
-        irradiance = self._weather_client.get_irradiance_at_minute(self._current_time)
-        temperature = self._weather_client.get_temperature_at_minute(self._current_time)
-        cloudcover = self._weather_client.get_cloudcover_at_minute(self._current_time)
+        query_time = datetime.combine(self._weather_date, self._current_time.time())
+        irradiance = self._weather_client.get_irradiance_at_minute(query_time)
+        temperature = self._weather_client.get_temperature_at_minute(query_time)
+        cloudcover = self._weather_client.get_cloudcover_at_minute(query_time)
         return irradiance, temperature, cloudcover
 
     def tick(self, time_delta_min: Optional[float] = None) -> dict:
-        """Advance simulation by one timestep and return current row.
+        """Return the row for the current timestep, then advance simulation.
+
+        The row is both sampled AND labeled at the current time (interval
+        start), so a twin started at 00:00 emits 00:00 first and 23:55 as
+        its 288th row.
 
         Args:
             time_delta_min: Minutes to advance. If None, uses config default (5 min).
@@ -119,7 +135,10 @@ class DigitalTwin:
         if time_delta_min is None:
             time_delta_min = self._time_delta_min
 
-        # Get weather for current time (before advancing)
+        # Sample AND label at the current time (interval start).
+        timestamp = self._current_time.strftime("%H:%M")
+
+        # Get weather for current time
         irradiance, ambient_temp, cloudcover = self._get_weather_for_current_time()
 
         # Solar generation
@@ -136,13 +155,6 @@ class DigitalTwin:
         # EV update
         ev_result = self._ev.tick(time_delta_min)
 
-        # Advance time
-        self._current_time += timedelta(minutes=time_delta_min)
-        self._step_count += 1
-
-        # Format timestamp as HH:MM
-        timestamp = self._current_time.strftime("%H:%M")
-
         # Build row matching generate_dataset.py schema exactly
         row = {
             "timestamp": timestamp,
@@ -154,6 +166,10 @@ class DigitalTwin:
             "ev_departure_min": ev_result["departure_min"],
             "ev_plugged_in": ev_result["plugged_in"],
         }
+
+        # Advance time after sampling/labeling
+        self._current_time += timedelta(minutes=time_delta_min)
+        self._step_count += 1
 
         return row
 

@@ -22,6 +22,14 @@ from datetime import datetime
 from typing import Optional
 
 
+# Appliance IDs excluded from household_load_kw totals. The EV charger's
+# power is tracked separately by EVModel, and generate_dataset.py's
+# household_load_kw has no EV term — counting it here double-counts
+# (PR #4 double-counting fix). The charger state is still simulated and
+# reported in appliance_loads/active_appliances for visibility.
+EXCLUDED_FROM_HOUSEHOLD_TOTAL = frozenset({"ev_charger"})
+
+
 @dataclass
 class ApplianceSpec:
     """Specification for a single appliance."""
@@ -42,12 +50,13 @@ class ApplianceModelConfig:
     """Configuration for the appliance model.
 
     Attributes:
-        seed: Random seed for deterministic behavior.
+        seed: Random seed for deterministic behavior. Default 42 so bare
+              DigitalTwinConfig defaults are repeatable.
         appliances: List of ApplianceSpec. If None, uses default roster
                     matching generate_dataset.py.
         base_load_kw: Base always-on load (kW). Default 0.6 kW (matches generator).
     """
-    seed: Optional[int] = None
+    seed: Optional[int] = 42
     appliances: Optional[list[ApplianceSpec]] = None
     base_load_kw: float = 0.6
 
@@ -172,8 +181,11 @@ class ApplianceModel:
 
         Returns:
             Dict with:
-                - "total_load_kw": Total household load (kW)
+                - "total_load_kw": Total household load (kW, excluding
+                  EXCLUDED_FROM_HOUSEHOLD_TOTAL — the EV charger is
+                  modeled separately by EVModel)
                 - "appliance_loads": Dict of appliance_id -> load_kw
+                  (includes ev_charger state for visibility)
                 - "active_appliances": List of currently active appliance_ids
         """
         self._current_minute = (self._current_minute + time_delta_min) % 1440
@@ -189,10 +201,12 @@ class ApplianceModel:
             self._maybe_end_cycle(spec, state, self._current_minute, time_delta_min)
             self._maybe_start_cycle(spec, state, self._current_minute, time_delta_min)
 
-            # Calculate load
+            # Calculate load (ev_charger excluded from the household total:
+            # the EV is modeled separately by EVModel)
             load = spec.power_kw if state["is_on"] else 0.0
             appliance_loads[spec.appliance_id] = load
-            total_load += load
+            if spec.appliance_id not in EXCLUDED_FROM_HOUSEHOLD_TOTAL:
+                total_load += load
 
             if state["is_on"]:
                 active.append(spec.appliance_id)
@@ -209,9 +223,11 @@ class ApplianceModel:
 
     @property
     def total_load_kw(self) -> float:
-        """Current total load without advancing time."""
+        """Current total load without advancing time (excludes ev_charger)."""
         total = self.config.base_load_kw
         for spec in self.config.appliances:
+            if spec.appliance_id in EXCLUDED_FROM_HOUSEHOLD_TOTAL:
+                continue
             state = self._appliance_states[spec.appliance_id]
             if state["is_on"]:
                 total += spec.power_kw

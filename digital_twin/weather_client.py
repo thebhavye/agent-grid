@@ -19,6 +19,7 @@ Design: The network layer can be mocked easily by passing a custom
 """
 
 import json
+import logging
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -26,6 +27,9 @@ from typing import Any, Optional
 from urllib.parse import urlencode
 
 import requests
+
+
+logger = logging.getLogger(__name__)
 
 
 # Module-level cache: key = (latitude, longitude, date_str), value = parsed data
@@ -80,11 +84,19 @@ class WeatherClient:
                      If None, uses requests.get directly. Allows mocking in tests.
             cache_dir: Optional directory for persistent file-based caching.
                        If None, only in-memory caching is used.
+
+        Attributes:
+            weather_source: How the last get_weather() result was obtained:
+                "api" (fresh fetch), "cache" (in-memory/file hit),
+                "stale-cache" (older profile remapped after a fetch
+                failure), "clear-sky-estimate" (synthetic fallback), or
+                "none" (nothing fetched yet).
         """
         self.latitude = latitude
         self.longitude = longitude
         self.timezone = timezone
         self._session = session or requests
+        self.weather_source: str = "none"
         self._cache_dir = Path(cache_dir) if cache_dir else None
         if self._cache_dir:
             self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -167,6 +179,19 @@ class WeatherClient:
     def get_weather(self, target_date: Optional[date] = None) -> dict:
         """Get weather data for a specific date.
 
+        Fallback chain (a warning is logged whenever a fallback is used):
+            1. Cached data for the date (fresh).
+            2. Fresh fetch from the API.
+            3. Stale cached profile for the same location (remapped onto
+               the requested date) if the fetch fails.
+            4. Deterministic clear-sky bell-curve estimate if nothing is
+               cached. This keeps tick() alive when the API is down; it is
+               an estimate, not observed weather.
+
+        Fallback results are cached in-memory under the requested date so
+        a dead API is not hammered on every tick; call clear_cache() to
+        force a retry.
+
         Args:
             target_date: Date to fetch weather for. Defaults to today.
                          Historical dates use the archive API; today/future
@@ -181,8 +206,11 @@ class WeatherClient:
                 - "date": the target date (date object)
 
         Raises:
-            ValueError: If API response is malformed or validation fails.
-            requests.RequestException: If network request fails.
+            ValueError: If API response is structurally malformed (missing
+                'hourly' data or required keys). Out-of-range values
+                (irradiance, cloudcover, temperature) are clamped with a
+                warning, never raised. Network failures never raise here;
+                they trigger the fallback chain above.
         """
         if target_date is None:
             target_date = date.today()
@@ -190,12 +218,33 @@ class WeatherClient:
         # Try cache first
         cached = self._get_cached(target_date)
         if cached is not None:
+            self.weather_source = "cache"
             return cached
 
-        # Fetch from API
-        raw_data = self._fetch_from_api(target_date)
+        # Fetch from API, falling back gracefully when the API is down.
+        try:
+            raw_data = self._fetch_from_api(target_date)
+        except requests.RequestException as exc:
+            stale = self._get_stale_cached(target_date)
+            if stale is not None:
+                logger.warning(
+                    "Weather API fetch failed for %s (%s); "
+                    "falling back to stale cached profile.",
+                    target_date, exc,
+                )
+                self.weather_source = "stale-cache"
+                return stale
+            logger.warning(
+                "Weather API fetch failed for %s (%s); "
+                "falling back to deterministic clear-sky estimate.",
+                target_date, exc,
+            )
+            estimated = self._clear_sky_estimate(target_date)
+            self._set_cached(target_date, estimated)
+            self.weather_source = "clear-sky-estimate"
+            return estimated
 
-        # Validate data ranges
+        # Sanitize data ranges (clamp + warn, never aborts the day)
         self._validate_data(raw_data["hourly"])
 
         # Package result
@@ -209,32 +258,96 @@ class WeatherClient:
 
         # Cache the result
         self._set_cached(target_date, result)
+        self.weather_source = "api"
         return result
 
-    def _validate_data(self, hourly: dict) -> None:
-        """Validate that weather data is physically plausible.
+    def _get_stale_cached(self, target_date: date) -> Optional[dict]:
+        """Return any cached profile for this location, remapped onto target_date.
 
-        Raises:
-            ValueError: If any validation check fails.
+        The hourly times keep their time-of-day but are re-dated to the
+        requested date, so interpolation works as usual. The remapped
+        profile is also cached under the requested date.
         """
-        # Irradiance should not be negative
+        for key, data in _cache.items():
+            if key[0] == self.latitude and key[1] == self.longitude:
+                date_prefix = target_date.isoformat()
+                remapped = dict(data)
+                remapped["time"] = [
+                    f"{date_prefix}T{t.split('T', 1)[1]}" for t in data["time"]
+                ]
+                remapped["date"] = target_date
+                self._set_cached(target_date, remapped)
+                return remapped
+        return None
+
+    def _clear_sky_estimate(self, target_date: date) -> dict:
+        """Build a deterministic clear-sky weather estimate for a date.
+
+        Daylight bell peaking at 12:30 (800 W/m²), zero at night, light
+        10% cloud, mild 24-32°C temperature curve. No randomness: the same
+        date always yields the same estimate. Only used when the API is
+        unreachable and nothing is cached.
+        """
+        times = []
+        radiation = []
+        cloud = []
+        temp = []
+        for h in range(24):
+            times.append(f"{target_date.isoformat()}T{h:02d}:00")
+            if 6 <= h <= 18:
+                frac = max(0.0, 1.0 - ((h - 12.5) / 7.0) ** 2)
+                radiation.append(round(800.0 * frac, 1))
+            else:
+                radiation.append(0.0)
+            cloud.append(10.0)
+            temp.append(round(24.0 + 8.0 * max(0.0, 1.0 - ((h - 14) / 9.0) ** 2), 1))
+        return {
+            "time": times,
+            "shortwave_radiation": radiation,
+            "cloudcover": cloud,
+            "temperature_2m": temp,
+            "date": target_date,
+        }
+
+    def _validate_data(self, hourly: dict) -> None:
+        """Sanitize weather data in place: clamp + warn per hour.
+
+        Out-of-range values are clamped (never raise, never abort the day):
+            - negative irradiance -> 0.0
+            - cloudcover clamped to [0, 100]
+            - temperature clamped to [-20, 60] (a reading outside that band
+              indicates a broken sensor/API payload, so it is clamped and
+              flagged loudly rather than trusted)
+        """
+        # Irradiance must not be negative: clamp to 0.
         irradiance = hourly.get("shortwave_radiation", [])
         for i, val in enumerate(irradiance):
             if val is not None and val < 0:
-                raise ValueError(f"Negative irradiance at index {i}: {val} W/m²")
+                logger.warning(
+                    "Negative irradiance at index %d: %s W/m²; clamping to 0.",
+                    i, val,
+                )
+                irradiance[i] = 0.0
 
-        # Cloud cover should be 0-100%
+        # Cloud cover must be 0-100%: clamp both ends.
         cloudcover = hourly.get("cloudcover", [])
         for i, val in enumerate(cloudcover):
             if val is not None and (val < 0 or val > 100):
-                raise ValueError(f"Cloud cover out of range [0,100] at index {i}: {val}%")
+                logger.warning(
+                    "Cloud cover out of range [0,100] at index %d: %s%%; clamping.",
+                    i, val,
+                )
+                cloudcover[i] = max(0.0, min(100.0, val))
 
-        # Temperature should be reasonable for Vellore (roughly -10 to 50°C)
-        # This is a sanity check, not a strict physical limit
+        # Temperature sanity band: clamp extreme outliers.
         temperature = hourly.get("temperature_2m", [])
         for i, val in enumerate(temperature):
             if val is not None and (val < -20 or val > 60):
-                raise ValueError(f"Temperature out of reasonable range at index {i}: {val}°C")
+                logger.warning(
+                    "Temperature out of range [-20,60] at index %d: %s°C; clamping.",
+                    i, val,
+                )
+                temperature[i] = max(-20.0, min(60.0, val))
 
     def get_irradiance_at_minute(self, target_datetime: datetime) -> float:
         """Get solar irradiance (W/m²) interpolated to a specific minute.
