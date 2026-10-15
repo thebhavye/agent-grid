@@ -255,3 +255,19 @@ available power or demands instead of propagating NaN allocations.
 Why: one bad sensor value silently corrupted the whole timestep (e.g. NaN
 battery SOC -> demand 0.0 + urgency 1.0); Phase 2 bidding needs trustworthy
 bids, so invalid input fails loudly at the source.
+
+## Phase 2 — Hybrid arbiter
+Decision: `hybrid_allocate(available_power_kw, bids, priorities)` serves
+priorities 1-2 together first, sharing proportionally to demand when solar
+is insufficient. Missing priorities default to 5. Flexible bids are sorted
+by descending urgency, then lower priority number, then agent ID.
+Urgencies within 1e-9 of the highest urgency in a band are treated as tied;
+the fixed highest-value anchor prevents transitive chains of near-ties.
+Within each band, equal-priority agents share proportionally to demand,
+and lower priority numbers are served first. Agent ID orders arithmetic
+deterministically, including when the input bids are reordered.
+Every allocation is capped at demand and excess solar is curtailed.
+Power validation and proportional sharing reuse the baseline helpers;
+invalid urgency, duplicate IDs, and total-demand overflow fail fast.
+This pure arbiter does not advance a twin or feed allocations into state;
+closed-loop integration and outcome metrics remain separate work.
