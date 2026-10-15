@@ -81,8 +81,15 @@ class ApplianceAgent(Agent):
         power = self.appliance_power_kw
         if power is None or _is_missing(power):
             power = DEFAULT_APPLIANCE_POWER_KW
-            
-        power = max(0.0, float(power))  # type: ignore
+
+        # Reject non-finite values BEFORE clamping (issue #26)
+        power_float = float(power)
+        if not math.isfinite(power_float):
+            raise ValueError(
+                f"appliance_power_kw must be finite, got {self.appliance_power_kw!r}"
+            )
+        # Only clamp finite negative values
+        power = max(0.0, power_float)
         
         if not getattr(self, 'appliance_deferable', False):
             return power

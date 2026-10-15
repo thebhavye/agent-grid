@@ -205,3 +205,12 @@ Why not recalibrate:
   without changing defaults.
 
 Revisit: if agent logic is found to implicitly depend on a specific solar peak range.
+
+## Issue #26 — Fail-fast bid/input validation
+Decision: Battery/EV agents raise ValueError on non-finite SOC/departure
+(ApplianceAgent keeps its 1.0 kW graceful default for missing/NaN rated
+power but raises on Inf), and baseline allocate() rejects NaN/Inf/negative
+available power or demands instead of propagating NaN allocations.
+Why: one bad sensor value silently corrupted the whole timestep (e.g. NaN
+battery SOC -> demand 0.0 + urgency 1.0); Phase 2 bidding needs trustworthy
+bids, so invalid input fails loudly at the source.

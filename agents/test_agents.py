@@ -44,6 +44,79 @@ def test_get_bid_packaging():
     assert _check_bid(appliance)["demand_kw"] > 0.0
 
 
+def test_nonfinite_soc_raises_loudly():
+    """Issue #26: NaN/Inf state must raise, not yield contradictory pairs."""
+    import math
+
+    import pytest
+
+    battery = BatteryAgent("battery_nan")
+    battery.update_state({"battery_soc_pct": float("nan")})
+    with pytest.raises(ValueError, match="finite"):
+        battery.get_demand_kw()
+    with pytest.raises(ValueError, match="finite"):
+        battery.compute_urgency()
+
+    ev = EVAgent("ev_inf", max_charge_kw=7.0)
+    ev.update_state({"ev_soc_pct": 20.0, "ev_departure_min": math.inf,
+                     "timestamp": "00:00"})
+    with pytest.raises(ValueError, match="finite"):
+        ev.compute_urgency()
+    ev.update_state({"ev_soc_pct": float("nan"), "ev_departure_min": 30,
+                     "timestamp": "00:00"})
+    with pytest.raises(ValueError, match="finite"):
+        ev.get_demand_kw()
+
+
+def test_unplugged_ev_invalid_soc_raises():
+    """Issue #26: unplugged EV must still fail fast on NaN/Inf SOC.
+
+    get_demand_kw()/compute_urgency() validate SOC before the
+    not-plugged-in early return, so a broken sensor value cannot hide
+    behind the unplugged state.
+    """
+    import pytest
+
+    for bad_soc in (float("nan"), float("inf")):
+        ev = EVAgent("ev_unplugged", max_charge_kw=7.0)
+        ev.update_state({"ev_soc_pct": bad_soc, "ev_plugged_in": False,
+                         "ev_departure_min": 30, "timestamp": "00:00"})
+        with pytest.raises(ValueError, match="finite"):
+            ev.get_demand_kw()
+        with pytest.raises(ValueError, match="finite"):
+            ev.compute_urgency()
+
+
+def test_nonfinite_timestamp_raises():
+    """Issue #26: non-finite numeric timestamps must raise loudly."""
+    import pytest
+
+    for bad_ts in (float("nan"), float("inf")):
+        ev = EVAgent("ev_bad_ts", max_charge_kw=7.0)
+        with pytest.raises(ValueError, match="timestamp"):
+            ev.update_state({"ev_soc_pct": 20.0, "ev_departure_min": 30,
+                             "timestamp": bad_ts})
+
+    ev = EVAgent("ev_bad_min", max_charge_kw=7.0)
+    ev.update_state({"ev_soc_pct": 20.0, "ev_departure_min": 30,
+                     "timestamp": "00:00"})
+    ev._current_min = float("inf")
+    with pytest.raises(ValueError, match="timestamp"):
+        ev.compute_urgency()
+
+
+def test_infinite_appliance_power_raises():
+    """Issue #26: Inf rated power must raise; None/NaN keeps the 1 kW default."""
+    import pytest
+
+    app = ApplianceAgent("app_inf", appliance_power_kw=float("inf"))
+    with pytest.raises(ValueError, match="finite"):
+        app.get_demand_kw()
+
+    assert ApplianceAgent("app_none").get_demand_kw() == 1.0
+    assert ApplianceAgent("app_nan", appliance_power_kw=float("nan")).get_demand_kw() == 1.0
+
+
 if __name__ == "__main__":
     print("=== AGENTGRID URGENCY TESTS ===")
 
