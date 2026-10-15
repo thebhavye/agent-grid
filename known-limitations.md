@@ -28,6 +28,14 @@
 - EVAgent.ev_plugged_in bool() coercion mistreats string values like
   "False" as truthy; not reachable via generator output (real bools), only
   hand-built test rows.
+- String timestamps are parsed permissively rather than strictly validated
+  as HH:MM: malformed strings leave the parsed time unset (EV urgency
+  becomes 0.0; appliance window checks treat the time as unknown), while
+  out-of-range integer components such as "25:90" are accepted. EVAgent's
+  non-finite numeric timestamp rejection does not validate string clocks.
+- Current static and twin-backed allocation runs are open-loop: allocations
+  do not drive battery/EV SOC or appliance completion. Outcome comparisons
+  require the planned Phase 2 closed-loop twin runner (see decisions.md).
 - EVAgent has a dead code path (minutes_left <= 0, ev_agent.py:59-60):
   unreachable with real data (the generator unplugs exactly at the
   departure minute), untested.
