@@ -1,3 +1,13 @@
+"""Baseline power allocator.
+
+This module intentionally contains no smart/priority logic.
+It allocates available power in proportion to each agent's demand,
+capped at what each agent requested: no agent ever receives more than
+its demand. Surplus solar (available > total demand) is curtailed --
+left unallocated -- since the system models no battery-priority charging,
+export, or other surplus sink yet.
+"""
+
 import math
 
 
