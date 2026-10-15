@@ -2,6 +2,7 @@
 
 import math
 from itertools import groupby
+from numbers import Integral
 
 from .baseline_allocator import _require_valid_kw, allocate
 
@@ -17,7 +18,8 @@ def hybrid_allocate(available_power_kw, bids, priorities) -> dict[str, float]:
     Every bid receives an entry, including zero demands. Allocations are
     capped at demand, and surplus is curtailed. Invalid power, non-finite
     or out-of-range urgency, duplicate IDs, and demand overflow raise
-    ValueError. Inputs are not modified.
+    ValueError. Priorities must be integers from 1 through 5 (excluding
+    booleans). Inputs are not modified; all returned values are floats.
     """
     remaining = _require_valid_kw(available_power_kw, "available_power_kw")
     demands = {}
@@ -33,6 +35,8 @@ def hybrid_allocate(available_power_kw, bids, priorities) -> dict[str, float]:
             raise ValueError(f"urgency for {agent_id!r} must be finite and in [0, 1]")
         demands[agent_id] = demand
         priority = priorities.get(agent_id, 5)
+        if isinstance(priority, bool) or not isinstance(priority, Integral) or not 1 <= priority <= 5:
+            raise ValueError(f"priority for {agent_id!r} must be an integer from 1 through 5")
         if priority <= 2:
             critical.append(agent_id)
         else:
@@ -57,6 +61,6 @@ def hybrid_allocate(available_power_kw, bids, priorities) -> dict[str, float]:
         if not group or remaining <= 0.0:
             continue
         allocated = allocate(remaining, {agent_id: demands[agent_id] for agent_id in group})
-        result.update(allocated)
+        result.update({agent_id: float(value) for agent_id, value in allocated.items()})
         remaining = max(0.0, remaining - sum(allocated.values()))
     return result

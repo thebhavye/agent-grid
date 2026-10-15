@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 
+import numpy as np
 import pytest
 
 from data.generate_dataset import generate_dataset
@@ -60,6 +61,30 @@ def test_empty_zero_power_and_all_zero_demands():
     assert hybrid_allocate(3, [], {}) == {}
     assert hybrid_allocate(0, [bid("a", 2)], {}) == {"a": 0}
     assert hybrid_allocate(3, [bid("a", 0)], {}) == {"a": 0}
+
+
+@pytest.mark.parametrize("value", [None, "1", 0, 6, 2.5, float("nan"), True, False])
+def test_invalid_priority_names_agent(value):
+    with pytest.raises(ValueError, match="priority.*'a'"):
+        hybrid_allocate(0, [bid("a", 0)], {"a": value})
+
+
+@pytest.mark.parametrize("value", [1, 2, 3, 4, 5, np.int64(1), np.int32(5)])
+def test_valid_integral_priorities(value):
+    assert hybrid_allocate(2, [bid("a", 2)], {"a": value}) == {"a": 2.0}
+
+
+def test_missing_priority_shares_with_explicit_priority_five():
+    assert hybrid_allocate(2, [bid("a", 1), bid("b", 3)], {"b": 5}) == {
+        "a": 0.5, "b": 1.5,
+    }
+
+
+@pytest.mark.parametrize("available", [0, 3])
+def test_zero_demand_allocations_are_floats(available):
+    result = hybrid_allocate(available, [bid("a", 0), bid("c", 0)], {"a": 1})
+    assert result == {"a": 0.0, "c": 0.0}
+    assert all(isinstance(value, float) for value in result.values())
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), -1])
