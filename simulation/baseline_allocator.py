@@ -39,7 +39,7 @@ def allocate(available_power_kw, agent_demands):
         for agent_id, demand in agent_demands.items()
     }
     total_demand = sum(agent_demands.values())
-    
+
     # Check for overflow (issue #26)
     if not math.isfinite(total_demand):
         raise ValueError(

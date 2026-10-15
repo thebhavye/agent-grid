@@ -15,7 +15,7 @@ def _require_finite(value, name):
 
 def _validate_supplied_finite(value, name):
     """Validate a supplied (non-None) value is finite.
-    
+
     None/missing values are allowed and handled elsewhere; this only
     rejects explicitly provided NaN/Inf.
     """
@@ -44,7 +44,7 @@ class EVAgent(Agent):
             
         ts = row.get("timestamp")
         self._current_min = None
-        
+
         # Validate numeric timestamps before discarding (issue #26)
         if isinstance(ts, (int, float)):
             _validate_supplied_finite(ts, "timestamp")
@@ -72,7 +72,7 @@ class EVAgent(Agent):
         _validate_supplied_finite(self.ev_soc_pct, "ev_soc_pct")
         _validate_supplied_finite(self.ev_departure_min, "ev_departure_min")
         _validate_supplied_finite(self._current_min, "timestamp")
-        
+
         if self.ev_soc_pct is None or not getattr(self, 'ev_plugged_in', False):
             return 0.0
             

@@ -54,3 +54,11 @@ def test_rejects_nonfinite_and_negative_inputs():
     for bad in (float("nan"), float("inf"), -2.5):
         with pytest.raises(ValueError, match="demand"):
             allocate(5.0, {"a": 1.0, "b": bad})
+
+
+def test_total_demand_overflow_raises():
+    """Issue #26: finite demands whose sum overflows to inf must raise."""
+    import pytest
+
+    with pytest.raises(ValueError, match="overflow"):
+        allocate(5.0, {"a": 1e308, "b": 1e308})
