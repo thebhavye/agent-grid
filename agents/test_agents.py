@@ -2,6 +2,118 @@ from agents.solar_agent import SolarAgent
 from agents.battery_agent import BatteryAgent
 from agents.ev_agent import EVAgent
 from agents.appliance_agent import ApplianceAgent
+from agents.battery_agent import BatteryLimits
+from dataclasses import fields
+
+import pytest
+
+from digital_twin.battery_model import BatteryModelConfig
+
+
+def test_battery_limits_match_twin_and_custom_config():
+    assert BatteryLimits() == BatteryLimits.from_twin_config(BatteryModelConfig())
+    cfg = BatteryModelConfig(capacity_kwh=20, max_charge_rate_c=0.25,
+                             max_discharge_rate_c=0.75,
+                             charge_efficiency=0.9, discharge_efficiency=0.8)
+    assert BatteryLimits.from_twin_config(cfg) == BatteryLimits(20, 5, 15, 0.9, 0.8, 20)
+
+
+@pytest.mark.parametrize("name", [field.name for field in fields(BatteryLimits)])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_battery_limits_reject_nonfinite(name, value):
+    with pytest.raises(ValueError, match=name):
+        BatteryLimits(**{name: value})
+
+
+@pytest.mark.parametrize("name", ["capacity_kwh", "max_charge_kw", "max_discharge_kw"])
+@pytest.mark.parametrize("value", [0, -1])
+def test_battery_limits_require_positive_capacity_and_rates(name, value):
+    with pytest.raises(ValueError, match=name):
+        BatteryLimits(**{name: value})
+
+
+@pytest.mark.parametrize("name", ["charge_efficiency", "discharge_efficiency"])
+@pytest.mark.parametrize("value", [-1, 0, 1.01])
+def test_battery_limits_reject_invalid_efficiencies(name, value):
+    with pytest.raises(ValueError, match=name):
+        BatteryLimits(**{name: value})
+
+
+@pytest.mark.parametrize("value", [-1, 100, 101])
+def test_battery_limits_reject_invalid_reserve(value):
+    with pytest.raises(ValueError, match="reserve_pct"):
+        BatteryLimits(reserve_pct=value)
+
+
+def test_battery_limits_accept_policy_boundaries():
+    assert BatteryLimits(charge_efficiency=1, discharge_efficiency=1,
+                         reserve_pct=0).reserve_pct == 0
+    assert BatteryLimits(reserve_pct=99.9).reserve_pct == 99.9
+
+
+def test_battery_legacy_bid_unchanged_with_custom_limits():
+    default = BatteryAgent("battery_1")
+    custom = BatteryAgent("battery_1", BatteryLimits(max_charge_kw=2))
+    assert default.limits == BatteryLimits()
+    assert default.limits is not BatteryAgent("another").limits
+    for agent in (default, custom):
+        agent.update_state({"battery_soc_pct": 50})
+        assert agent.get_bid() == {"agent_id": "battery_1", "demand_kw": 2.5,
+                                   "urgency": 0.25}
+
+
+@pytest.mark.parametrize("soc,expected", [(None, 0), (0, 0), (20, 0),
+                                         (100, 12), (20.1, 0.136656)])
+def test_battery_supply_caps(soc, expected):
+    agent = BatteryAgent("battery")
+    agent.update_state({"battery_soc_pct": soc})
+    assert agent.get_supply_kw() == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("soc,expected", [(None, 0), (100, 0), (0, 6),
+                                         (99.9, 0.144 / 0.949)])
+def test_battery_headroom_caps(soc, expected):
+    agent = BatteryAgent("battery")
+    agent.update_state({"battery_soc_pct": soc})
+    assert agent.get_charge_headroom_kw() == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("method", ["get_supply_kw", "get_charge_headroom_kw"])
+@pytest.mark.parametrize("soc", [float("nan"), float("inf"), -float("inf")])
+def test_battery_supply_and_headroom_reject_nonfinite_soc(method, soc):
+    agent = BatteryAgent("battery")
+    agent.update_state({"battery_soc_pct": soc})
+    with pytest.raises(ValueError, match="finite"):
+        getattr(agent, method)()
+
+
+@pytest.mark.parametrize("method", ["get_supply_kw", "get_charge_headroom_kw"])
+@pytest.mark.parametrize("soc", [None, 0, 50, 100])
+@pytest.mark.parametrize("dt", [0, -5, float("nan"), float("inf"), -float("inf")])
+def test_battery_supply_and_headroom_reject_invalid_timestep(method, soc, dt):
+    agent = BatteryAgent("battery")
+    agent.update_state({"battery_soc_pct": soc})
+    with pytest.raises(ValueError, match="time_delta_min"):
+        getattr(agent, method)(dt)
+
+
+@pytest.mark.parametrize("soc", [20, 20.01, 40, 99.99, 100])
+@pytest.mark.parametrize("dt", [1, 5, 30, 240, 1440])
+@pytest.mark.parametrize("limits", [BatteryLimits(), BatteryLimits(24, 3, 7, 0.8, 0.9, 10)])
+def test_battery_energy_safety_and_queries_do_not_change_state(soc, dt, limits):
+    agent = BatteryAgent("battery", limits)
+    agent.update_state({"battery_soc_pct": soc})
+    before = agent.get_bid()
+    supply = agent.get_supply_kw(dt)
+    headroom = agent.get_charge_headroom_kw(dt)
+    discharged_soc = soc - supply * (dt / 60) / limits.discharge_efficiency / limits.capacity_kwh * 100
+    charged_soc = soc + headroom * (dt / 60) * limits.charge_efficiency / limits.capacity_kwh * 100
+    assert 0 <= supply <= limits.max_discharge_kw
+    assert 0 <= headroom <= limits.max_charge_kw
+    assert discharged_soc >= limits.reserve_pct - 1e-10
+    assert charged_soc <= 100 + 1e-10
+    assert agent.battery_soc_pct == soc
+    assert agent.get_bid() == before
 
 
 def _check_bid(agent):
