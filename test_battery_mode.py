@@ -10,7 +10,8 @@ from simulation.battery_mode import choose_battery_mode
 @pytest.mark.parametrize("inputs,mode,demand,supply", [
     ((10, 4, 5, 12, 6), "charge", 5, 0),
     ((10, 4, 5, 12, 2), "charge", 2, 0),
-    ((4, 4, 5, 12, 2), "charge", 2, 0),
+    ((5, 4, 5, 12, 6), "charge", 1, 0),
+    ((4, 4, 5, 12, 2), "idle", 0, 0),
     ((10, 4, 0, 12, 6), "idle", 0, 0),
     ((10, 4, 5, 12, 0), "idle", 0, 0),
     ((1, 4, 5, 12, 6), "discharge", 0, 3),
@@ -48,7 +49,8 @@ def test_grid_one_mode_caps_and_purity():
         assert isinstance(demand, float) and isinstance(delivered, float)
         assert demand == 0 or delivered == 0
         if solar >= other:
-            assert demand == min(battery, headroom)
+            assert demand == min(battery, headroom, solar - other)
+            assert other + demand <= solar + 1e-12
             assert delivered == 0
             assert result["mode"] == ("charge" if demand else "idle")
         else:

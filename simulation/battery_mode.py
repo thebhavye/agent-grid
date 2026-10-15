@@ -7,7 +7,8 @@ def choose_battery_mode(solar_kw, other_demand_kw, battery_demand_kw,
                         supply_kw, headroom_kw) -> dict:
     """Choose charge on solar surplus, discharge on deficit, or idle.
 
-    Charge demand is capped by headroom; supply is capped by the deficit.
+    Charge demand is capped by headroom and solar surplus; supply is
+    capped by the deficit. At exact solar/load balance the battery idles.
     These are feasible bids, not applied power or updates to battery state.
     Every input must be finite and nonnegative, even in an unused mode.
     """
@@ -20,7 +21,7 @@ def choose_battery_mode(solar_kw, other_demand_kw, battery_demand_kw,
     supply = 0.0
     mode = "idle"
     if solar_kw >= other_demand_kw:
-        demand = min(battery_demand_kw, headroom_kw)
+        demand = min(battery_demand_kw, headroom_kw, solar_kw - other_demand_kw)
         if demand > 0:
             mode = "charge"
     else:
