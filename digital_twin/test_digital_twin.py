@@ -799,6 +799,54 @@ class TestApplianceModel:
 # ---------------------------------------------------------------------------
 
 class TestDigitalTwin:
+    @pytest.mark.parametrize("durations", [(5, 15), (1, 7.5, 15, 2.5), (60, 1440, 5)])
+    def test_simulated_minutes_tracks_mixed_ticks(self, durations):
+        twin = make_test_twin()
+        start = twin.current_time
+        elapsed = 0.0
+        for dt in durations:
+            twin.tick(dt)
+            elapsed += dt
+            assert twin.simulated_minutes == elapsed
+            assert twin.simulated_minutes == (twin.current_time - start).total_seconds() / 60
+
+    @pytest.mark.parametrize("dt", [5, 15])
+    def test_simulated_minutes_default_ticks(self, dt):
+        twin = make_test_twin(time_delta_min=dt)
+        assert twin.simulated_minutes == 0
+        for count in range(1, 4):
+            twin.tick()
+            assert twin.simulated_minutes == count * dt
+
+    @pytest.mark.parametrize("new_start", [None, datetime(2024, 2, 2, 12, 30),
+                                          datetime(2024, 1, 14, 23, 55, tzinfo=timezone.utc)])
+    def test_simulated_minutes_restarts_on_reset(self, new_start):
+        twin = make_test_twin()
+        original_start = twin.current_time
+        twin.tick(5)
+        twin.tick(15)
+        twin.reset(new_start)
+        start = original_start if new_start is None else new_start
+        assert twin.current_time == start
+        assert twin.simulated_minutes == 0
+        twin.tick(15)
+        assert twin.simulated_minutes == 15
+        assert twin.current_time == start + timedelta(minutes=15)
+        twin.reset()
+        assert twin.current_time == original_start
+        assert twin.simulated_minutes == 0
+
+    @pytest.mark.parametrize("dt", [float("nan"), float("inf"), -float("inf")])
+    def test_rejected_tick_does_not_advance_elapsed_time(self, dt):
+        twin = make_test_twin()
+        twin.tick(15)
+        before = twin.current_time
+        with pytest.raises((ValueError, OverflowError)):
+            twin.tick(dt)
+        assert twin.current_time == before
+        assert twin.step_count == 1
+        assert twin.simulated_minutes == 15
+
     def test_tick_returns_all_required_keys(self):
         twin = make_test_twin()
         row = twin.tick(5)

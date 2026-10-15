@@ -48,8 +48,6 @@
 - Twin weather cache is module-global and unbounded (no TTL): shared across
   clients, grows on multi-location runs, and stale forecasts never refresh
   without an explicit clear_cache().
-- DigitalTwin.simulated_minutes ignores per-tick dt (step_count * default);
-  variable-dt runs report the wrong elapsed time.
 - Default twin seed 42 always yields the evening_topup EV scenario; the
   overnight path is only exercised via explicit-scenario tests.
 - Twin battery clamps to [0, 100] (hits 0.0 on some seeds) while the

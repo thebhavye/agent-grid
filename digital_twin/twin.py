@@ -64,6 +64,7 @@ class DigitalTwin:
 
         self._start_datetime = config.start_datetime
         self._current_time = config.start_datetime
+        self._run_start_time = self._current_time
         self._time_delta_min = config.time_delta_min
         self._step_count = 0
 
@@ -199,8 +200,8 @@ class DigitalTwin:
 
     @property
     def simulated_minutes(self) -> float:
-        """Total simulated minutes elapsed."""
-        return self._step_count * self._time_delta_min
+        """Minutes advanced since construction or the most recent reset."""
+        return (self._current_time - self._run_start_time).total_seconds() / 60.0
 
     def run_full_day(self, steps: int = 288, time_delta_min: Optional[float] = None) -> list[dict]:
         """Run a full 24-hour simulation and return all rows.
@@ -230,6 +231,7 @@ class DigitalTwin:
         self._current_time = (
             start_datetime if start_datetime is not None else self._start_datetime
         )
+        self._run_start_time = self._current_time
         self._step_count = 0
         # Recompute weather anchor: use override if configured, else the (new) start date
         self._weather_date = (
