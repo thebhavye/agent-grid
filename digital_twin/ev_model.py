@@ -206,7 +206,11 @@ class EVModel:
         # Update time
         self._current_minute = (self._current_minute + time_delta_min) % 1440
 
-        # Check for segment transitions
+        # Check for segment transitions.  A disconnected EV has been driving
+        # between the two overnight segments, so its SOC must be reset to the
+        # new segment's start value when it returns home.  Without this, the
+        # morning target SOC carries into the evening segment and the computed
+        # charging delta is negative, suppressing all evening charging.
         prev_plugged = self._plugged_in
         self._update_plugged_state(self._current_minute)
 
@@ -214,6 +218,8 @@ class EVModel:
 
         if self._plugged_in and self._active_segment_idx >= 0:
             seg = self._segments[self._active_segment_idx]
+            if not prev_plugged:
+                self._soc_pct = seg.start_soc
             seg_duration = seg.end_min - seg.start_min
             charge_duration = max(seg_duration * 0.8, 1.0)
             elapsed = self._current_minute - seg.start_min

@@ -954,6 +954,31 @@ class TestDigitalTwin:
         twin_first_unplug = next(r["timestamp"] for r in rows if not r["ev_plugged_in"])
         assert twin_first_unplug == f"{twin_dep // 60:02d}:{twin_dep % 60:02d}"
 
+    @pytest.mark.parametrize("seed", [1, 7, 42])
+    def test_overnight_evening_segment_resets_soc_and_charges(self, seed):
+        """Issue #45: returning from daytime driving restores evening start SOC."""
+        from digital_twin.ev_model import EVModel
+
+        ev = EVModel(EVModelConfig(scenario=EVScenario.OVERNIGHT, seed=seed))
+        ev.initialize_at(datetime(2024, 1, 15, 0, 0))
+        evening = ev._segments[1]
+
+        # Match DigitalTwin's interval-start clock alignment: the first tick
+        # reports 00:00, then subsequent ticks advance in five-minute steps.
+        ev._current_minute -= 5
+        evening_start = None
+        later_charging = []
+        for _ in range(288):
+            row = ev.tick(5)
+            if ev.current_minute == evening.start_min:
+                evening_start = row
+            if ev.current_minute > evening.start_min and row["charging_kw"] > 0:
+                later_charging.append(row["charging_kw"])
+
+        assert evening_start is not None
+        assert evening_start["soc_pct"] == pytest.approx(evening.start_soc)
+        assert later_charging, "overnight evening segment should charge after plug-in"
+
     def test_midday_scenario_full_day_edges(self):
         """Issue #27: the MIDDAY scenario (never covered before) meets the
         same edge contract: unplugged at midnight, plug-in inside the
