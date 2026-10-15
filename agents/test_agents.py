@@ -109,9 +109,10 @@ def test_infinite_appliance_power_raises():
     """Issue #26: Inf rated power must raise; None/NaN keeps the 1 kW default."""
     import pytest
 
-    app = ApplianceAgent("app_inf", appliance_power_kw=float("inf"))
-    with pytest.raises(ValueError, match="finite"):
-        app.get_demand_kw()
+    for bad_power in (float("inf"), float("-inf")):
+        app = ApplianceAgent("app_inf", appliance_power_kw=bad_power)
+        with pytest.raises(ValueError, match="finite"):
+            app.get_demand_kw()
 
     assert ApplianceAgent("app_none").get_demand_kw() == 1.0
     assert ApplianceAgent("app_nan", appliance_power_kw=float("nan")).get_demand_kw() == 1.0

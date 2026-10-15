@@ -72,6 +72,47 @@ Why: the bid is per-agent/per-timestep state; timestep ownership stays
 with the caller (which already holds the row), so stamping time inside
 the bid would duplicate caller state and invite skew.
 
+## 2026-10-15 — Phase 2 arbiter and closed-loop evaluation plan
+Decision: Phase 2 will combine hybrid allocation, a battery that can supply
+or consume power, and a closed-loop twin runner evaluated against the
+proportional baseline. This is planned work, not current behavior.
+
+- Hybrid allocation: satisfy critical/non-deferable loads first, then rank
+  flexible demand using urgency bids and share power proportionally within
+  equal-priority groups. Cap every allocation at requested power and
+  enforce a timestep power balance; record unmet demand and curtailment.
+- Battery as supply and demand: expose feasible discharge supply as well
+  as charging demand, constrained by SOC/reserve, capacity, charge/discharge
+  limits, and efficiency from the twin configuration. Select one mode per
+  timestep so the battery cannot charge and discharge simultaneously.
+  The existing demand-only get_bid() contract remains unchanged until an
+  explicit supply/mode contract is introduced during implementation.
+- Closed-loop runner: observe current state, collect bids, allocate, apply
+  the delivered power for that interval, then advance the twin. Battery
+  and EV SOC and appliance progress/completion must reflect actual served
+  energy rather than independent precomputed trajectories. Avoid applying
+  the twin's existing autonomous charging updates a second time.
+- Fair baseline comparison: run the hybrid arbiter and proportional
+  allocator separately from identical initial state, weather, seeds,
+  appliance/EV scenarios, timestep, and physical constraints. Both runs
+  must use the same closed-loop physics and battery feasibility rules;
+  keep the current allocate() function as the proportional reference,
+  with any battery-mode adapter shared and documented. Do not compare
+  closed-loop outcomes against the existing open-loop replay as though
+  its SOC were a result of baseline allocation.
+- Score outcomes using critical unmet energy (kWh), EV SOC/target shortfall
+  at departure, appliance completed/missed windows, curtailed solar (kWh),
+  and battery SOC/reserve violations and throughput (kWh). Report paired
+  results across fixed scenarios/seeds, including overnight EV windows;
+  verify energy conservation and charge/discharge exclusivity before
+  claiming an improvement.
+
+Why: replaying the same precomputed SOC for every allocator measures only
+power splits. Feedback is necessary to establish whether bidding improves
+charging, service completion, and use of solar under the same constraints.
+The existing run_simulation()/run_twin_simulation() replay paths remain
+available for deterministic demand/allocation checks.
+
 ## 2026-10-06 — Digital twin model assumptions (REAL DATA vs SIMPLIFIED PHYSICS vs SCENARIO)
 Decision: digital_twin/ splits the world into three honesty tiers. REAL EXTERNAL DATA: only
 solar irradiance/cloudcover/temperature from Open-Meteo (Vellore 12.97, 79.16, Asia/Kolkata;

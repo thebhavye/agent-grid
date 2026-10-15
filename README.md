@@ -146,8 +146,11 @@ row = twin.tick(5)  # same keys as generate_dataset()["timeseries"] rows
 
 Notes:
 
-- `simulation/run_simulation.py` is NOT wired to the twin yet — the twin stands alone; wiring is a
-  separate task.
+- `simulation/run_simulation.py` provides `run_twin_simulation(twin, allocator)`, which uses the
+  twin's own appliance roster and EV charging limit. It advances 288 configured timesteps
+  (24 hours at the default five-minute step), then allocates solar over the resulting rows.
+  Allocations do not feed back into battery, EV, or appliance state yet; closed-loop evaluation
+  is planned for Phase 2 (see `decisions.md`).
 - Solar/battery models are simplified physics approximations, honestly documented in each
   module's docstring — not high-fidelity models.
 - Tests: `pytest digital_twin/ -m "not live"` (offline); the single `@pytest.mark.live` smoke test
