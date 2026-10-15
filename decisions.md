@@ -286,3 +286,24 @@ discharge on a load deficit, or idle when no feasible demand/supply remains.
 Charge and discharge are mutually exclusive. The selector returns feasible
 power bids; it does not apply power, run a closed-loop simulation, or mutate
 twin state. Both baseline and hybrid callers can use the same policy.
+
+## Phase 2 — Twin observe/commit step (issue #54)
+Decision: `DigitalTwin.observe()` advances the EV and appliance exogenous
+schedules once and records the interval without applying battery, EV charging,
+or appliance runtime progress. `commit(delivered)` then applies either the
+autonomous behavior (`delivered=None`) or caller-provided power and advances
+the twin clock exactly once. Calling either method out of order is an error.
+
+`DigitalTwinConfig(closed_loop=False)` preserves the legacy tick path and its
+captured 288-row outputs. Closed-loop mode uses stable per-appliance RNG
+streams and a fixed pair of schedule draws per appliance per interval, so
+allocation changes cannot shift later random draws. A successful start draw
+while an earlier cycle is still running is recorded as a blocked start.
+
+Delivered battery power is signed and passes through the single battery model
+update for the interval. EV delivery is non-negative, capped by the configured
+charger rate and SOC headroom, and is rejected while unplugged. Flexible
+appliance runtime decreases in proportion to served/desired power; essential
+loads never complete. Closed-loop rows expose desired and served appliance
+power plus the battery power actually applied. The runner and outcome metrics
+remain separate follow-up work.
