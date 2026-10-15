@@ -653,12 +653,58 @@ class TestBatteryModel:
             discharge_efficiency=0.9, initial_soc_pct=50.0,
         )
         batt = BatteryModel(cfg)
+        assert batt.available_energy_kwh == pytest.approx(5.0)
         in_res = batt.update(5.0, 60)
+        assert in_res["energy_charged_kwh"] == pytest.approx(4.5)
+        assert in_res["stored_energy_kwh"] == pytest.approx(9.5)
+        assert in_res["soc_pct"] == pytest.approx(95.0)
+        # 9.5 kWh stored can deliver 8.55 kWh, so a 5 kWh request
+        # removes 5 / 0.9 kWh internally without reaching the SOC floor.
+        assert batt.available_energy_kwh * cfg.discharge_efficiency == pytest.approx(8.55)
         out_res = batt.update(-5.0, 60)
-        # Stored 4.5 kWh, then asked for 5 kWh out -> must drain the 4.5 stored
-        # plus clamp at 0; net SOC must be below start (losses are real).
-        assert batt.soc_pct < 50.0
-        assert in_res["energy_charged_kwh"] < out_res["energy_discharged_kwh"] or True
+        assert out_res["energy_discharged_kwh"] == pytest.approx(5.0 / 0.9)
+        assert out_res["energy_discharged_kwh"] * cfg.discharge_efficiency == pytest.approx(5.0)
+        assert out_res["stored_energy_kwh"] == pytest.approx(9.5 - 5.0 / 0.9)
+        assert batt.soc_pct == pytest.approx((9.5 - 5.0 / 0.9) * 10)
+
+    def test_roundtrip_discharge_floor_reports_actual_energy_removed(self):
+        batt = BatteryModel(BatteryModelConfig(
+            capacity_kwh=10, initial_soc_pct=50,
+            charge_efficiency=0.9, discharge_efficiency=0.9,
+        ))
+        batt.update(5, 60)
+        result = batt.update(-10, 60)  # 10 kWh requested, only 8.55 deliverable.
+        assert result["energy_discharged_kwh"] == pytest.approx(9.5)
+        assert result["energy_discharged_kwh"] * 0.9 == pytest.approx(8.55)
+        assert result["stored_energy_kwh"] == pytest.approx(0.0)
+        assert batt.soc_pct == pytest.approx(0.0)
+
+    @pytest.mark.parametrize("charge_eff,discharge_eff", [(0.9, 0.9), (0.8, 0.95), (1.0, 1.0)])
+    def test_roundtrip_conserves_energy_without_soc_clamps(self, charge_eff, discharge_eff):
+        cfg = BatteryModelConfig(capacity_kwh=10, initial_soc_pct=50,
+                                 charge_efficiency=charge_eff,
+                                 discharge_efficiency=discharge_eff)
+        batt = BatteryModel(cfg)
+        initial_energy = batt.available_energy_kwh
+        electrical_in = 2.0  # 2 kW for one hour, below the 5 kW charge limit.
+        charged = batt.update(electrical_in, 60)
+        expected_stored_gain = electrical_in * charge_eff
+        assert charged["energy_charged_kwh"] == pytest.approx(expected_stored_gain)
+        assert charged["stored_energy_kwh"] == pytest.approx(initial_energy + expected_stored_gain)
+        assert 0 < charged["soc_pct"] < 100
+
+        expected_out = electrical_in * charge_eff * discharge_eff
+        discharged = batt.update(-expected_out, 60)
+        # The reported discharge is INTERNAL energy removed. Convert it
+        # to electrical energy delivered before comparing with input.
+        electrical_out = discharged["energy_discharged_kwh"] * discharge_eff
+        assert discharged["energy_discharged_kwh"] == pytest.approx(expected_stored_gain)
+        assert electrical_out > 0
+        assert electrical_out == pytest.approx(expected_out)
+        assert electrical_out <= expected_out + 1e-12  # kWh floating-point roundoff.
+        assert discharged["stored_energy_kwh"] == pytest.approx(initial_energy)
+        assert batt.soc_pct == pytest.approx(50.0)
+        assert 0 < batt.soc_pct < 100
 
     def test_temperature_rises_under_load(self):
         batt = BatteryModel()
