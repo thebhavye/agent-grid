@@ -171,7 +171,7 @@ class WeatherClient:
         return None
 
     def _set_cached(self, target_date: date, data: dict) -> None:
-        """Store data in cache."""
+        """Store API-fetched data in memory and, when configured, on disk."""
         key = self._cache_key(target_date)
         _cache[key] = data
         if self._cache_dir:
@@ -184,6 +184,10 @@ class WeatherClient:
                     json.dump(serializable, f)
             except (OSError, TypeError):
                 pass  # Cache write failure is non-fatal
+
+    def _set_memory_cached(self, target_date: date, data: dict) -> None:
+        """Store fallback data in memory without persisting it to disk."""
+        _cache[self._cache_key(target_date)] = data
 
     def _normalize_datetime(self, dt: datetime) -> datetime:
         """Normalize a datetime to the client's configured timezone.
@@ -274,9 +278,10 @@ class WeatherClient:
                cached. This keeps tick() alive when the API is down; it is
                an estimate, not observed weather.
 
-        Fallback results are cached in-memory under the requested date so
-        a dead API is not hammered on every tick; call clear_cache() to
-        force a retry.
+        Fallback results are cached in memory only under the requested date,
+        so a dead API is not hammered on every tick.  Calling clear_cache()
+        removes that in-memory fallback and allows a retry in the same
+        process; file-backed cache entries are unaffected.
 
         Args:
             target_date: Date to fetch weather for. Defaults to today in the
@@ -326,7 +331,7 @@ class WeatherClient:
                 target_date, exc,
             )
             estimated = self._clear_sky_estimate(target_date)
-            self._set_cached(target_date, estimated)
+            self._set_memory_cached(target_date, estimated)
             self.weather_source = "clear-sky-estimate"
             return estimated
 
@@ -362,7 +367,7 @@ class WeatherClient:
                     f"{date_prefix}T{t.split('T', 1)[1]}" for t in data["time"]
                 ]
                 remapped["date"] = target_date
-                self._set_cached(target_date, remapped)
+                self._set_memory_cached(target_date, remapped)
                 return remapped
         return None
 
@@ -569,7 +574,11 @@ class WeatherClient:
         return 0.0
 
     def clear_cache(self) -> None:
-        """Clear the in-memory cache. File cache is not affected."""
+        """Clear in-memory profiles, including fallback estimates.
+
+        This permits a retry after an API failure in the current process.
+        Persisted API profiles in ``cache_dir`` are intentionally retained.
+        """
         global _cache
         _cache.clear()
 

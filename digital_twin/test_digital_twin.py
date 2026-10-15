@@ -281,6 +281,28 @@ class TestWeatherClient:
         assert second["time"] == first["time"]
         assert second["date"] == TEST_DATE
 
+    def test_fallback_profiles_are_not_persisted(self, tmp_path):
+        """Issue #46: fallback weather must not masquerade as file cache data."""
+        import requests as _requests
+
+        class FailingSession:
+            def get(self, url, timeout=30):
+                raise _requests.RequestException("simulated outage")
+
+        failing = WeatherClient(session=FailingSession(), cache_dir=str(tmp_path))
+        estimated = failing.get_weather(date(2024, 3, 1))
+        assert failing.weather_source == "clear-sky-estimate"
+        assert estimated["date"] == date(2024, 3, 1)
+        assert not list(tmp_path.glob("*.json"))
+
+        _cache.clear()  # Simulate a new process with no in-memory fallback.
+        working_session = FakeSession(target_date=date(2024, 3, 1))
+        working = WeatherClient(session=working_session, cache_dir=str(tmp_path))
+        fetched = working.get_weather(date(2024, 3, 1))
+        assert working.weather_source == "api"
+        assert len(working_session.urls) == 1
+        assert fetched["date"] == date(2024, 3, 1)
+
     def test_corrupt_file_cache_falls_back_to_fetch(self, tmp_path):
         """Issue #27: unreadable cache files never block a fresh fetch."""
         client, session = _mock_client(cache_dir=str(tmp_path))
@@ -974,11 +996,11 @@ class TestDigitalTwin:
         assert isinstance(row["ev_departure_min"], int)
         assert isinstance(row["ev_plugged_in"], bool)
 
-    def test_api_failure_uses_stale_cache(self, caplog):
+    def test_api_failure_uses_stale_cache(self, caplog, tmp_path):
         """Fix 3 (stale leg): a cached profile is remapped onto the new date."""
         import requests as _requests
 
-        client, _ = _mock_client()
+        client, _ = _mock_client(cache_dir=str(tmp_path))
         cached = client.get_weather(TEST_DATE)
         assert len(client._session.urls) == 1
 
@@ -995,6 +1017,9 @@ class TestDigitalTwin:
         assert data["date"] == other_day
         assert all(t.startswith("2024-01-16T") for t in data["time"])
         assert data["shortwave_radiation"] == cached["shortwave_radiation"]
+        assert not (tmp_path / (
+            f"{client.latitude}_{client.longitude}_{other_day.isoformat()}.json"
+        )).exists()
 
     def test_multiday_rollover_reuses_weather_profile(self):
         """Fix 4: past tick 288 the day-1 profile repeats; no new fetches."""
