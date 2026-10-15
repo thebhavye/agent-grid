@@ -271,3 +271,18 @@ Power validation and proportional sharing reuse the baseline helpers;
 invalid urgency, duplicate IDs, and total-demand overflow fail fast.
 This pure arbiter does not advance a twin or feed allocations into state;
 closed-loop integration and outcome metrics remain separate work.
+
+## Phase 2 — Battery supply and mode selection
+Decision: the battery can bid for charging or report feasible discharge
+supply, bounded by configured power limits, efficiency, and timestep
+energy. The default 20% SOC reserve protects stored backup energy;
+discharge stops at that floor. BatteryLimits defaults match the twin's
+12 kWh, 0.5C/1C, and 0.949 efficiency configuration; C-rates are converted
+to kW when importing a twin config. Existing demand/bid behavior is retained.
+The shared pure choose_battery_mode helper caps charging demand by solar
+surplus as well as headroom, leaving other loads' power available. At exact
+solar/load balance it idles. It selects charge on positive solar surplus,
+discharge on a load deficit, or idle when no feasible demand/supply remains.
+Charge and discharge are mutually exclusive. The selector returns feasible
+power bids; it does not apply power, run a closed-loop simulation, or mutate
+twin state. Both baseline and hybrid callers can use the same policy.
