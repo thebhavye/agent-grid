@@ -1,14 +1,16 @@
 # Offline twin scenarios
 
-`list_scenarios()` returns the seven names in alphabetical order.
+`list_scenarios()` returns the eight names in alphabetical order.
 `build_twin(name, closed_loop=False)` returns a fresh `DigitalTwin`; an unknown
 name raises `ValueError` listing the available choices. `CATALOG[name]` holds
 the weather filename, start date, EV scenario/seed, appliance seed, battery
-initial SOC/capacity, timestep and step count.
+initial SOC/capacity, timestep and step count. Optional `panel_area_m2` defaults
+to 20.0, preserving the original scenarios' solar configuration and outputs.
 
 | Scenario | Weather source date | Steps | What it stresses |
 | --- | --- | ---: | --- |
 | `clear_day` | 2024-01-25 | 288 | Sunny-midday baseline; this real day also has morning/evening cloud |
+| `demo_sunny_home` | 2024-01-25 | 288 | Dashboard default: larger 60 m2 array shows daytime battery charging and evening discharge |
 | `monsoon_cloudy` | 2023-12-04 | 288 | Overcast monsoon profile with weak, variable irradiance |
 | `heatwave` | 2024-05-01 | 288 | Hot pre-monsoon air temperatures and PV temperature derating |
 | `low_battery_start` | 2024-01-25 | 288 | Battery starts at the 20% discharge reserve |
@@ -20,6 +22,13 @@ All scenarios use five-minute steps, EV seed 42 and appliance seed 42.
 Unless listed otherwise, battery initial SOC is 50%, capacity is 12 kWh,
 and the EV scenario is `midday`. `overnight_ev_cloudy` uses `overnight`.
 Every build creates separate model state and RNGs.
+
+`demo_sunny_home` uses the unchanged clear-day weather and battery defaults
+(50% initial SOC, 12 kWh capacity), but a 60 m2 solar array: 12 kWp at the
+model's 20% STC efficiency. This explicit high-end residential sizing makes
+the full battery cycle visible in demos; it is not a claim about typical roof
+size or measured AC output. Existing scenarios remain at 20 m2. No weather
+values or twin physics are changed.
 
 The degraded scenario is an explicit capacity proxy, not a battery aging or
 state-of-health model. Health remains the twin default; changing capacity
