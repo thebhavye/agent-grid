@@ -217,6 +217,32 @@ Notes:
 - `test_agents.py` exercises the agents; `test_baseline.py` /
   `test_simulation.py` cover the allocator and end-to-end pipeline.
 
+## Dashboard (demo UI)
+
+An interactive Streamlit dashboard runs the closed-loop digital twin live on the
+saved offline scenarios and shows the hybrid arbiter next to the proportional
+baseline. Use a virtual environment, because Streamlit pins its own versions of
+shared packages such as `starlette` and `protobuf`:
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate            # Windows (source .venv/bin/activate on macOS/Linux)
+python -m pip install -r requirements-dashboard.txt
+python -m streamlit run dashboard/app.py
+```
+
+Then open http://localhost:8501. The sidebar picks the scenario, the allocation
+strategy and an optional fault to inject; the tabs show:
+
+- **Overview**: power flows, battery/EV state of charge, where the power went, unmet demand
+- **Agents & decisions**: every agent's bid (priority, urgency, requested vs received) at
+  the selected moment, with a plain-English explanation generated from the arbiter's rules
+- **Hybrid vs baseline**: all outcome metrics for both strategies on the same scenario
+- **Faults**: the affected steps and any sensor substitutions the runner made
+
+The data layer (`dashboard/data.py`) has no Streamlit dependency and is covered by
+`dashboard/test_data.py` in the normal offline test suite.
+
 ## Visualization
 
 Run `python viz/plot_day.py --seed 42` to save `day_plot.png` with solar vs allocated power, allocations by agent group, and dataset battery/EV SOC with EV plug-in shading. SOC comes from the static dataset, not allocation feedback. Run the headless tests with `python -m pytest viz/test_plot_day.py`.
