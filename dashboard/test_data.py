@@ -69,8 +69,66 @@ def test_explanation_wording_matches_what_was_received(clear_hybrid):
             partial, why = match[1] is not None, match[3]
             if why.startswith("served in full"):
                 assert not partial, line
-            if why.startswith(("held back", "shared the remaining", "waited")):
+            if why.startswith(("held back", "shared what was left", "waited", "same urgency")):
                 assert partial and int(match[2]) < 100, line
+
+
+def _step(strategy, timestamp, scenario="clear_day"):
+    records = data.run(data.RunKey(scenario, strategy))
+    return next(r for r in records if r["timestamp"] == timestamp)
+
+
+def _line_for(lines, label):
+    return next(line for line in lines if line.startswith(f"{label}:"))
+
+
+def test_baseline_shortage_says_proportional_not_equally_ranked():
+    # clear_day baseline 03:15: priority-1 and priority-2 loads get the same
+    # fraction because the baseline ignores rank (PR #80 review).
+    lines = data.explain_step(_step("baseline", "03:15"), "baseline")
+    for label in ("Fridge", "Lighting"):
+        line = _line_for(lines, label)
+        assert "proportional baseline" in line, line
+        assert "ranked" not in line and "essential" not in line, line
+
+
+def test_priority_tiebreak_is_not_called_more_urgent():
+    # clear_day hybrid 09:35: washing machine (p4) and water heater (p3) both
+    # have urgency 0.00; the water heater goes first on priority, not urgency.
+    lines = data.explain_step(_step("hybrid", "09:35"), "hybrid")
+    line = _line_for(lines, "Washing machine")
+    assert "more urgent" not in line, line
+    assert "same urgency" in line and "Water heater" in line and "3 vs 4" in line, line
+
+
+@pytest.mark.parametrize("scenario", ["clear_day", "monsoon_cloudy", "overnight_ev_cloudy"])
+def test_hybrid_reasons_are_true_for_every_step(scenario):
+    """Each causal claim in the hybrid wording holds for that step's bids."""
+    import re
+    for record in data.run(data.RunKey(scenario, "hybrid")):
+        agents = {data.agent_label(k): (record["priorities"].get(k, 5), v["urgency"], v["allocated_kw"])
+                  for k, v in record["agents"].items()}
+        for line in data.explain_step(record, "hybrid")[1:]:
+            name = line.split(":", 1)[0]
+            if name not in agents:
+                continue
+            priority, urgency, _ = agents[name]
+            match = re.search(r"waited behind more urgent loads \((.+)\)", line)
+            if match:
+                for other in match[1].split(", "):
+                    assert agents[other][1] > urgency + 1e-9 and agents[other][2] > 0, line
+            match = re.search(r"same urgency \(.+\) as (.+), which went first on priority", line)
+            if match:
+                other = agents[match[1]]
+                assert abs(other[1] - urgency) <= 1e-9 and other[0] < priority and other[2] > 0, line
+            if "with other priority-" in line:
+                assert priority <= 2, line
+
+
+def test_baseline_wording_never_claims_priority_or_urgency():
+    for record in data.run(data.RunKey("clear_day", "baseline")):
+        for line in data.explain_step(record, "baseline")[1:]:
+            assert "essential" not in line and "urgen" not in line and "ranked" not in line, line
 
 
 def test_step_table_orders_by_priority(clear_hybrid):

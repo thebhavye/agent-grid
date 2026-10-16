@@ -91,20 +91,56 @@ LOWER_IS_BETTER = {
 ESSENTIAL_IDS = ("household_base_load",)  # plus every priority 1-2 appliance
 GROUPS = ("Essentials", "EV", "Battery charging", "Flexible appliances")
 
-def _reason_text(reason: str, served: float, demand: float) -> str:
-    """Wording for an explain/facts reason code, given what the agent received."""
+_URGENCY_TIE = 1e-9  # same band tolerance as hybrid_allocate / explain.facts
+
+
+def _deferral_text(agent: dict, agents: list[dict]) -> str:
+    """Name the served flexible loads this agent actually waited behind, and why.
+
+    Hybrid order is urgency (descending), then priority number (ascending)
+    within an urgency band, so a deferral is either "more urgent" or "same
+    urgency, higher priority" - never claim the first when only the second
+    holds.
+    """
+    served = [a for a in agents
+              if a is not agent and a["priority"] > 2 and a["allocated_kw"] > 1e-9]
+    more_urgent = [a for a in served if a["urgency"] > agent["urgency"] + _URGENCY_TIE]
+    if more_urgent:
+        names = ", ".join(agent_label(a["agent_id"]) for a in more_urgent[:2])
+        return f"waited behind more urgent loads ({names})"
+    same_band = [a for a in served
+                 if abs(a["urgency"] - agent["urgency"]) <= _URGENCY_TIE
+                 and a["priority"] < agent["priority"]]
+    if same_band:
+        first = same_band[0]
+        return (f"same urgency ({agent['urgency']:.2f}) as {agent_label(first['agent_id'])}, "
+                f"which went first on priority ({first['priority']} vs {agent['priority']})")
+    return "waited behind earlier urgency and priority groups"
+
+
+def _reason_text(agent: dict, agents: list[dict], strategy: str) -> str:
+    """Policy-faithful wording for an explain/facts reason code."""
+    reason, served, demand = agent["reason"], agent["allocated_kw"], agent["demand_kw"]
     full = served >= demand - 1e-9
-    if reason == "critical_first":
-        return ("served in full: essential loads come first when power is short" if full
-                else "held back because higher-priority essential loads came first")
-    if reason == "deferred_lower_urgency":
-        return "waited behind more urgent loads"
-    if reason == "shared_proportionally":
-        return ("served in full" if full
-                else "shared the remaining power with equally ranked loads")
     if reason == "missed_window":
         return "outside its usual running window"
-    return "fully served"
+    if full:
+        if strategy == "hybrid" and reason == "critical_first":
+            return "served in full: essential loads come first when power is short"
+        return "served in full"
+    if strategy == "baseline":
+        # The proportional baseline gives every load the same fraction of its
+        # request, regardless of priority or urgency.
+        return "every load received the same fraction of its request (proportional baseline)"
+    if reason == "critical_first":
+        return "held back because higher-priority essential loads came first"
+    if reason == "deferred_lower_urgency":
+        return _deferral_text(agent, agents)
+    if reason == "shared_proportionally":
+        if agent["priority"] <= 2:
+            return f"shared what was left proportionally with other priority-{agent['priority']} loads"
+        return "shared what was left proportionally with loads of the same urgency and priority"
+    return "served in full"
 
 
 @dataclass(frozen=True)
@@ -292,7 +328,7 @@ def explain_step(record: dict, strategy: str) -> list[str]:
             if agent["agent_id"] == "solar_1" or agent["reason"] == "no_demand":
                 continue
             served, demand = agent["allocated_kw"], agent["demand_kw"]
-            why = _reason_text(agent["reason"], served, demand)
+            why = _reason_text(agent, facts["agents"], strategy)
             share = "" if served >= demand - 1e-9 else f" ({100 * served / demand:.0f}%)"
             lines.append(f"{agent_label(agent['agent_id'])}: {served:.2f} of "
                          f"{demand:.2f} kW{share}, {why}.")
