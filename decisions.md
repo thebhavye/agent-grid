@@ -385,6 +385,52 @@ priority-2 singleton limited by earlier priority-1 service reports
 critical_first. Actual priority-2 peers still report proportional sharing
 within their own pool; no sharing across critical priorities is implied.
 
+## Issue #67 - Explicit EV charging segments
+
+Decision: EVModelConfig accepts an optional non-empty list of EVSegment values,
+with plug_in_min, departure_min, start_soc and target_soc. Custom schedules
+override scenario selection and skip all random segment draws. EVModel.scenario
+reports "custom" without adding a random-selectable EVScenario enum member.
+The seed still controls the existing autonomous charging noise. segments=None
+keeps scenario selection, RNG draws, charging and the #54 snapshot unchanged.
+
+Intervals are half-open, sorted and non-overlapping, with finite numeric times
+0 <= plug_in_min < departure_min <= 1440 and finite SOC values in [0, 100].
+Adjacent intervals are allowed, and targets need not exceed starting SOC.
+Configuration and model copy supplied intervals so callers cannot mutate an
+active schedule through their original list or segment objects. The original
+start_min/end_min model accessors remain available as aliases.
+
+Follow the existing overnight scenario's day-bounded convention for a single
+23:30-to-06:00 connection:
+
+```python
+EVModelConfig(segments=[
+    EVSegment(0, 360, 15, 80),
+    EVSegment(1410, 1440, 15, 80),
+])
+```
+
+The midnight tail comes first because intervals are sorted by minute of day.
+A wrapping pair such as (1410, 360) is invalid, not silently reordered.
+SOC resets to 15% on the actual evening plug-in, not on the continuous midnight
+connection. Departure reporting retains the first interval's rounded end modulo
+1440 (06:00 here). Observe/commit still uses actual delivered power, charging
+efficiency, maximum power and capacity limits; autonomous mode retains its
+existing per-interval ramp. reset() preserves custom intervals and replays the
+same seeded behavior. The late_ev_arrival scenario catalog integration is a
+follow-up once the scenario library is merged, not a dependency of this change.
+
+Review clarification: "single overnight segment" is implemented as one logical
+connection represented by two day-bounded intervals, not a wrapping EVSegment.
+This reconciles the explicit 0 <= start < end <= 1440 constraint with overnight
+charging. This interpretation was accepted at merge review (2026-10-16).
+
+The custom scenario sentinel is deliberately a string rather than an extra
+random-selectable enum member. Consumers must not assume .value is available
+for custom schedules. EVSegment's former start_min/end_min constructor keyword
+names are not supported; positional construction and read-only aliases remain.
+
 ## Issue #63 — Saved offline weather and stress scenarios
 Decision: provide seven named scenarios through CATALOG, list_scenarios()
 and build_twin(name, closed_loop=False), using existing twin configuration

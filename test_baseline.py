@@ -44,7 +44,6 @@ def test_simulation_runs_for_each_timestep():
 
 def test_rejects_nonfinite_and_negative_inputs():
     """Issue #26: NaN/Inf/negative power must raise, not poison allocations."""
-    import math
 
     import pytest
 
