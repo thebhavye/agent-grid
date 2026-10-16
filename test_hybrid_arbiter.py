@@ -1,6 +1,7 @@
 """Behavioral checks for the standalone hybrid solar arbiter."""
 
 from copy import deepcopy
+import random
 
 import numpy as np
 import pytest
@@ -25,7 +26,59 @@ def test_critical_first_and_proportional_shortage():
     bids = [bid("a", 1, 0), bid("b", 3, 0), bid("flex", 8, 1)]
     priorities = {"a": 1, "b": 2, "flex": 3}
     assert hybrid_allocate(6, bids, priorities) == {"a": 1, "b": 3, "flex": 2}
-    assert hybrid_allocate(2, bids, priorities) == {"a": 1, "b": 1, "flex": 0}
+    assert hybrid_allocate(2, bids, priorities) == {"a": 1.0, "b": 1.0, "flex": 0.0}
+
+
+def test_priority_one_is_fully_served_before_priority_two():
+    bids = [bid("p1_a", 2), bid("p1_b", 1), bid("p2", 4), bid("flex", 5, 1)]
+    priorities = {"p1_a": 1, "p1_b": 1, "p2": 2, "flex": 3}
+
+    assert hybrid_allocate(2, bids, priorities) == {
+        "flex": 0.0, "p1_a": 4 / 3, "p1_b": 2 / 3, "p2": 0.0,
+    }
+    assert hybrid_allocate(5, bids, priorities) == {
+        "flex": 0.0, "p1_a": 2.0, "p1_b": 1.0, "p2": 2.0,
+    }
+
+
+def test_priority_two_never_receives_power_before_priority_one_is_full():
+    bids = [bid("p1", 2), bid("p2_a", 1), bid("p2_b", 3), bid("flex", 4)]
+    priorities = {"p1": 1, "p2_a": 2, "p2_b": 2, "flex": 3}
+    for available in (0, 1, 1.99, 2, 2.5, 5, 10):
+        result = hybrid_allocate(available, bids, priorities)
+        if result["p2_a"] or result["p2_b"]:
+            assert result["p1"] == pytest.approx(2.0)
+
+
+def test_randomized_priority_order_invariants():
+    rng = random.Random(55)
+    for _ in range(200):
+        bids = [
+            bid(f"agent_{index}", rng.uniform(0, 5), rng.random())
+            for index in range(8)
+        ]
+        priorities = {
+            item["agent_id"]: rng.randint(1, 5)
+            for item in bids
+        }
+        available = rng.uniform(0, sum(item["demand_kw"] for item in bids) + 2)
+        allocations = hybrid_allocate(available, bids, priorities)
+        reordered = hybrid_allocate(available, list(reversed(bids)), priorities)
+
+        assert allocations == reordered
+        assert sum(allocations.values()) == pytest.approx(
+            min(available, sum(item["demand_kw"] for item in bids))
+        )
+        for item in bids:
+            agent_id = item["agent_id"]
+            assert 0.0 <= allocations[agent_id] <= item["demand_kw"]
+
+        p1 = [item for item in bids if priorities[item["agent_id"]] == 1]
+        p2 = [item for item in bids if priorities[item["agent_id"]] == 2]
+        p1_allocated = sum(allocations[item["agent_id"]] for item in p1)
+        p1_demand = sum(item["demand_kw"] for item in p1)
+        if any(allocations[item["agent_id"]] > 1e-12 for item in p2):
+            assert p1_allocated == pytest.approx(p1_demand)
 
 
 @pytest.mark.parametrize("available, expected", [
@@ -170,3 +223,16 @@ def test_full_generated_day_power_balance_and_caps():
             assert 0 <= allocations[item["agent_id"]] <= item["demand_kw"] + 1e-12
         assert sum(allocations.values()) == pytest.approx(
             min(row["solar_gen_kw"], sum(item["demand_kw"] for item in bids)))
+
+        p1_ids = {
+            item["agent_id"] for item in bids
+            if priorities.get(item["agent_id"], 5) == 1
+        }
+        p2_ids = {
+            item["agent_id"] for item in bids
+            if priorities.get(item["agent_id"], 5) == 2
+        }
+        if any(allocations[agent_id] > 0 for agent_id in p2_ids):
+            assert sum(allocations[agent_id] for agent_id in p1_ids) == pytest.approx(
+                sum(item["demand_kw"] for item in bids if item["agent_id"] in p1_ids)
+            )

@@ -307,3 +307,31 @@ appliance runtime decreases in proportion to served/desired power; essential
 loads never complete. Closed-loop rows expose desired and served appliance
 power plus the battery power actually applied. The runner and outcome metrics
 remain separate follow-up work.
+
+## Phase 2 — Closed-loop runner (issue #56)
+Decision: `simulation.closed_loop.run_closed_loop()` is the shared execution
+loop for proportional and hybrid allocator comparisons. It observes a fresh
+closed-loop twin, updates the existing agents, derives battery charge/supply
+feasibility from the twin configuration, selects charge/discharge/idle mode,
+allocates power, and commits the signed battery plus load deliveries exactly
+once. `proportional_adapter()` adapts the unchanged baseline allocator to the
+same bid/priorities interface used by `hybrid_allocate()`.
+
+Appliance bids use the twin observation's `appliance_desired_kw` values when
+present; `ApplianceAgent` retains its rated-power behavior for legacy rows
+without that optional key. Priority maps come from the twin roster, with the
+EV charger priority applied to `ev_1` and the battery assigned priority 5.
+
+Every record includes the allocator inputs and outputs, selected mode,
+available and curtailed power, signed battery power, desired/served appliance
+power, and post-commit SOC state. The runner rejects stale or non-closed-loop
+twins and checks allocation caps, charge/discharge exclusivity, power balance,
+and zero curtailment in discharge mode. Metrics and paired outcome scoring
+remain separate follow-up work.
+
+The fixed household base load participates as `household_base_load`, an
+always-on priority-1 bid, so it is included in allocation and battery balance.
+Physical limits and energy checks use unrounded SOC and solar power. EV
+service is recorded separately as `ev_applied_kw`, capped by physical charging
+headroom, and excluded from appliance totals to avoid counting it twice.
+Post-commit balance and SOC checks verify actual delivery, not just requests.
