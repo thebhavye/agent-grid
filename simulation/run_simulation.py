@@ -132,6 +132,25 @@ def _coerce_roster_records(appliances_df):
     )
 
 
+def _dataframe_rows(frame):
+    """Treat missing optional preference cells as absent row overrides."""
+    import pandas as pd
+
+    rows = frame.to_dict(orient="records")
+    if isinstance(frame, pd.DataFrame):
+        for key in ("ev_target_soc_pct", "ev_ready_by_min"):
+            if key not in frame.columns:
+                continue
+            # Read original cells: to_dict() converts pd.NA to None, losing
+            # the distinction between missing and an explicit deadline reset.
+            for row, value in zip(rows, frame[key].array):
+                if key == "ev_ready_by_min" and value is None:
+                    row[key] = None
+                elif pd.isna(value):
+                    row.pop(key, None)
+    return rows
+
+
 def _normalize_inputs(dataset, appliances_df):
     """Accept the real two-table dataset dict, a bare timeseries
     DataFrame, or a legacy list of row dicts.
@@ -142,11 +161,11 @@ def _normalize_inputs(dataset, appliances_df):
     if isinstance(dataset, dict) and "timeseries" in dataset:
         ts = dataset["timeseries"]
         ap = dataset.get("appliances", appliances_df)
-        rows = ts.to_dict(orient="records") if hasattr(ts, "to_dict") else list(ts)
+        rows = _dataframe_rows(ts) if hasattr(ts, "to_dict") else list(ts)
         return rows, ap
     if hasattr(dataset, "to_dict"):
         # Bare timeseries DataFrame passed directly.
-        return dataset.to_dict(orient="records"), appliances_df
+        return _dataframe_rows(dataset), appliances_df
     # Legacy list-of-dicts path (used by test_baseline.py).
     return list(dataset), appliances_df
 

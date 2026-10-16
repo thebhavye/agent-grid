@@ -156,6 +156,25 @@ def test_get_bid_packaging():
     assert _check_bid(appliance)["demand_kw"] > 0.0
 
 
+def test_appliance_desired_power_override_is_optional_and_authoritative():
+    agent = ApplianceAgent(
+        "appliance_dishwasher",
+        appliance_id="dishwasher",
+        appliance_deferable=True,
+        appliance_power_kw=1.2,
+        appliance_usual_start_min=0,
+        appliance_usual_end_min=60,
+    )
+    agent.update_state({
+        "timestamp": "00:05",
+        "appliance_desired_kw": {"dishwasher": 0.0},
+    })
+    assert agent.get_demand_kw() == 0.0
+
+    agent.update_state({"timestamp": "00:10"})
+    assert agent.get_demand_kw() == 1.2
+
+
 def test_nonfinite_soc_raises_loudly():
     """Issue #26: NaN/Inf state must raise, not yield contradictory pairs."""
     import math

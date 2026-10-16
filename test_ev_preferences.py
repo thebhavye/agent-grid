@@ -1,11 +1,12 @@
 """EV preference behavior and compatibility with the original default policy."""
 
 import pytest
+import pandas as pd
 
 from agents.ev_agent import EVAgent
 from data.generate_dataset import generate_dataset
 from simulation.baseline_allocator import allocate
-from simulation.run_simulation import _build_agents, run_simulation
+from simulation.run_simulation import _build_agents, _normalize_inputs, run_simulation
 
 
 def state(**overrides):
@@ -113,3 +114,44 @@ def test_runner_and_builder_passthrough(with_roster):
                             ev_max_charge_kw=7, ev_target_soc_pct=80,
                             ev_ready_by_min=420)
     assert [step["ev_1"] for step in result] == pytest.approx([2.1, 0, 2.1])
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_sparse_dataframe_preferences_restore_constructor_defaults(wrapped):
+    frame = pd.DataFrame([state(solar_gen_kw=100) for _ in range(3)])
+    frame["ev_target_soc_pct"] = [float("nan"), 80.0, float("nan")]
+    frame["ev_ready_by_min"] = [float("nan"), 420.0, float("nan")]
+    original = frame.copy(deep=True)
+    dataset = {"timeseries": frame} if wrapped else frame
+    result = run_simulation(dataset, allocate, ev_max_charge_kw=7,
+                            ev_target_soc_pct=90, ev_ready_by_min=390)
+    assert [row["ev_1"] for row in result] == pytest.approx([2.8, 2.1, 2.8])
+    rows, _ = _normalize_inputs(dataset, None)
+    agent = EVAgent("ev", 7, target_soc_pct=90, ready_by_min=390)
+    for row, expected in zip(rows, [390, 420, 390]):
+        agent.update_state(row)
+        assert agent.ev_ready_by_min == expected
+    pd.testing.assert_frame_equal(frame, original)
+
+
+def test_dataframe_missing_ready_by_differs_from_explicit_none():
+    frame = pd.DataFrame([state() for _ in range(3)])
+    frame["ev_ready_by_min"] = pd.Series([pd.NA, None, 420], dtype=object)
+    rows, _ = _normalize_inputs(frame, None)
+    agent = EVAgent("ev", 7, ready_by_min=390)
+    for row, expected in zip(rows, [390, None, 420]):
+        agent.update_state(row)
+        assert agent.ev_ready_by_min == expected
+
+
+def test_nullable_target_column_missing_cells_use_defaults():
+    frame = pd.DataFrame([state(solar_gen_kw=100) for _ in range(3)])
+    frame["ev_target_soc_pct"] = pd.Series([pd.NA, 80, pd.NA], dtype="Float64")
+    result = run_simulation(frame, allocate, ev_max_charge_kw=7, ev_target_soc_pct=90)
+    assert [row["ev_1"] for row in result] == pytest.approx([2.8, 2.1, 2.8])
+
+
+def test_dataframe_does_not_hide_invalid_sensor_values():
+    frame = pd.DataFrame([{**state(), "ev_soc_pct": float("nan"), "solar_gen_kw": 100}])
+    with pytest.raises(ValueError, match="ev_soc_pct"):
+        run_simulation(frame, allocate)
