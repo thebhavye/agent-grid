@@ -12,7 +12,7 @@ from digital_twin.twin import DigitalTwin, DigitalTwinConfig
 from digital_twin.weather_client import WeatherClient
 from digital_twin.solar_model import SolarModel, SolarModelConfig
 from digital_twin.battery_model import BatteryModel, BatteryModelConfig
-from digital_twin.ev_model import EVModel, EVModelConfig, EVScenario
+from digital_twin.ev_model import EVModel, EVModelConfig, EVScenario, EVSegment
 from digital_twin.appliance_model import ApplianceModel, ApplianceModelConfig
 from digital_twin.faults import (
     DeviceFaultConfig,
@@ -33,6 +33,7 @@ __all__ = [
     "EVModel",
     "EVModelConfig",
     "EVScenario",
+    "EVSegment",
     "ApplianceModel",
     "ApplianceModelConfig",
     "FaultConfig",

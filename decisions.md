@@ -385,6 +385,123 @@ priority-2 singleton limited by earlier priority-1 service reports
 critical_first. Actual priority-2 peers still report proportional sharing
 within their own pool; no sharing across critical priorities is implied.
 
+## Issue #67 - Explicit EV charging segments
+
+Decision: EVModelConfig accepts an optional non-empty list of EVSegment values,
+with plug_in_min, departure_min, start_soc and target_soc. Custom schedules
+override scenario selection and skip all random segment draws. EVModel.scenario
+reports "custom" without adding a random-selectable EVScenario enum member.
+The seed still controls the existing autonomous charging noise. segments=None
+keeps scenario selection, RNG draws, charging and the #54 snapshot unchanged.
+
+Intervals are half-open, sorted and non-overlapping, with finite numeric times
+0 <= plug_in_min < departure_min <= 1440 and finite SOC values in [0, 100].
+Adjacent intervals are allowed, and targets need not exceed starting SOC.
+Configuration and model copy supplied intervals so callers cannot mutate an
+active schedule through their original list or segment objects. The original
+start_min/end_min model accessors remain available as aliases.
+
+Follow the existing overnight scenario's day-bounded convention for a single
+23:30-to-06:00 connection:
+
+```python
+EVModelConfig(segments=[
+    EVSegment(0, 360, 15, 80),
+    EVSegment(1410, 1440, 15, 80),
+])
+```
+
+The midnight tail comes first because intervals are sorted by minute of day.
+A wrapping pair such as (1410, 360) is invalid, not silently reordered.
+SOC resets to 15% on the actual evening plug-in, not on the continuous midnight
+connection. Departure reporting retains the first interval's rounded end modulo
+1440 (06:00 here). Observe/commit still uses actual delivered power, charging
+efficiency, maximum power and capacity limits; autonomous mode retains its
+existing per-interval ramp. reset() preserves custom intervals and replays the
+same seeded behavior. The late_ev_arrival scenario catalog integration is a
+follow-up once the scenario library is merged, not a dependency of this change.
+
+Review clarification: "single overnight segment" is implemented as one logical
+connection represented by two day-bounded intervals, not a wrapping EVSegment.
+This reconciles the explicit 0 <= start < end <= 1440 constraint with overnight
+charging. This interpretation was accepted at merge review (2026-10-16).
+
+The custom scenario sentinel is deliberately a string rather than an extra
+random-selectable enum member. Consumers must not assume .value is available
+for custom schedules. EVSegment's former start_min/end_min constructor keyword
+names are not supported; positional construction and read-only aliases remain.
+
+## Issue #63 — Saved offline weather and stress scenarios
+Decision: provide seven named scenarios through CATALOG, list_scenarios()
+and build_twin(name, closed_loop=False), using existing twin configuration
+APIs. Each build creates fresh models and an offline WeatherClient session
+reading a saved JSON payload, with an instance-local cache independent of
+live weather requests. No twin physics, EV model or runner behavior changes.
+
+Saved Vellore profiles come from Open-Meteo's historical archive for
+2024-01-25 (sunny midday), 2023-12-04 (overcast monsoon) and 2024-05-01
+(hot pre-monsoon). They are historical reanalysis, not station measurements;
+hourly values are unchanged, and request URLs, retrieval date, units and
+CC BY attribution are retained. No synthetic fallback data was needed.
+
+The low-battery scenario starts at 20% SOC. Reduced capacity (6 versus
+12 kWh) is an explicitly assumed degradation proxy, not a health/aging
+model. Three-day runs use 864 five-minute steps and repeat one saved weather
+day, rather than implying varying multi-day historical weather. The hot-day
+test isolates derating using identical irradiance at 25 C ambient as a
+counterfactual control. Explicit late-EV-arrival segments remain issue #67.
+
+## Issue #57 - Outcome metrics and paired comparison
+
+Decision: score committed closed-loop records and compare separate twins using
+identical initial state, physics, seeds, timestep, and the existing synthetic
+weather fixture. Weather caches are isolated; no network is used. Before scoring,
+compare solar, EV connection/departure/target series and all drawn appliance cycle
+starts, including initialization draws. Accepted starts and later demand can
+legitimately differ with allocations; these are outcomes, not fairness inputs.
+
+The runner adds observational metadata only: priorities, reserve, segment target,
+real departures, cycle completion/deadline events, blocked-start increments and
+start draws. No bids, allocation policies, RNG draws or physics are changed.
+A regression test compares all previous record fields with telemetry disabled.
+
+Energy uses each record's dt_min. Unmet load includes base load and EV once,
+excluding the battery storage bid and solar. Battery energies are electrical
+terminal kWh, positive battery_kw charging and negative discharging. EV shortfall
+is summed percentage-point deficit at each real departure using the last
+plugged interval's committed SOC and that segment's target; meeting it adds zero.
+Continuous overnight connection at midnight and a truncated run are not
+additional departures. Cycle misses are counted at window end even if a cycle
+later completes; blocked starts are increments, not repeated cumulative totals.
+Reserve counting tolerates only 1e-9 percentage points of floating-point noise.
+Balance is recomputed from actual appliance/EV service, served base load, solar,
+signed battery power and curtailment, with no EV display-load double counting.
+
+Measured with python -m simulation.compare: seeds 1, 7, 42 across overnight,
+midday and evening_topup, each 288 five-minute steps, two strategies per pair.
+All 18 runs have balance errors below 1e-6 kW (maximum 1.088018564e-14 kW)
+and zero battery reserve violations. Full hybrid/baseline/delta values for all
+12 metrics are saved in simulation/comparison_results.md and the PR description.
+The following deltas are hybrid minus baseline:
+
+| Seed | EV scenario | Critical unmet delta (kWh) | Flexible unmet delta (kWh) | Departure shortfall delta (pp) |
+|---|---|---|---|---|
+| 1 | overnight | -1.273225817 | 3.984209366 | 0.29066547 |
+| 1 | midday | -4.720696896 | 38.60869739 | 3.967829883 |
+| 1 | evening_topup | -0.9575598701 | 3.624287337 | 1.191216758 |
+| 7 | overnight | -1.330639928 | 3.120719413 | 0.7139311619 |
+| 7 | midday | -4.331048275 | 49.51918374 | 2.629671815 |
+| 7 | evening_topup | -0.7538255529 | 2.317095053 | 1.01350414 |
+| 42 | overnight | -1.352072885 | 3.063224573 | 1.074269437 |
+| 42 | midday | -3.430880178 | 10.11872226 | 3.453560144 |
+| 42 | evening_topup | -0.7258181343 | 2.850443566 | 1.006303087 |
+
+Hybrid protects critical loads better in all nine pairs but has higher flexible
+unmet energy and EV departure shortfall in every pair; there is no overall
+superiority claim. Three seeds, one synthetic weather day and a one-day horizon
+are limited evidence. The overnight evening segment's next morning departure is
+outside the horizon, and allocation-dependent requests need not total equally.
+
 ## Issue #68 — Runner fault-handling policy and device faults
 Decision: the closed-loop runner owns a configurable
 `on_bad_reading` policy with values `"raise"` (default), `"hold_last"`, and
