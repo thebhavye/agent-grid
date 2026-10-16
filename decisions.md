@@ -286,3 +286,19 @@ discharge on a load deficit, or idle when no feasible demand/supply remains.
 Charge and discharge are mutually exclusive. The selector returns feasible
 power bids; it does not apply power, run a closed-loop simulation, or mutate
 twin state. Both baseline and hybrid callers can use the same policy.
+
+
+## EV user preferences (issue #62)
+EVAgent accepts target_soc_pct (default 100%) and ready_by_min (default
+None, using reported departure). Targets must be finite in (0, 100];
+ready-by must be None or finite in [0, 1440). Invalid preferences raise
+ValueError at construction or row update, even when the EV is unplugged.
+Optional ev_target_soc_pct and ev_ready_by_min row keys override constructor
+preferences for that step only; absent keys restore constructor defaults.
+An explicit row ready-by of None selects the reported departure.
+Demand retains max_charge_kw times the positive SOC gap divided by 100;
+urgency uses that same target gap and the existing overnight-wrapped time
+pressure, returning zero at or above target. Existing sensor validation
+still applies, including non-finite reported departure values.
+_build_agents and run_simulation pass both preferences through. Defaults
+preserve existing bids; twin EV models and charging segments are unchanged.
