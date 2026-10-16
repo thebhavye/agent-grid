@@ -6,6 +6,7 @@ import math
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
+from numbers import Integral
 from typing import Any, Iterable, Mapping
 
 import pandas as pd
@@ -32,24 +33,40 @@ class FaultConfig:
             raise ValueError("enabled must be a boolean")
         try:
             self.seed = int(self.seed)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("seed must be an integer") from exc
         if self.faults is None:
             self.faults = []
-        self.faults = list(self.faults)
-        for spec in self.faults:
-            _normalize_spec(spec)
+        self.faults = [_normalize_spec(spec) for spec in self.faults]
+
+
+def _integer(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError(f"{name} must be an integer")
+    return int(value)
+
+
+def _finite(value: Any, name: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be finite") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be finite")
+    return result
 
 
 def _normalize_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(spec, Mapping):
         raise ValueError("each fault must be a mapping")
+    spec = dict(spec)
     fault_type = spec.get("type", spec.get("fault_type"))
     key = spec.get("key")
-    if fault_type not in FAULT_TYPES:
+    if not isinstance(fault_type, str) or fault_type not in FAULT_TYPES:
         raise ValueError(f"unsupported fault type: {fault_type!r}")
     if not isinstance(key, str) or not key:
         raise ValueError("fault key must be a non-empty string")
+    spec["type"] = fault_type
     has_window = "start_step" in spec or "end_step" in spec
     has_probability = "probability" in spec
     if has_window and has_probability:
@@ -57,24 +74,32 @@ def _normalize_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
     if not has_window and not has_probability:
         raise ValueError("fault needs start_step/end_step or probability")
     if has_window:
-        start = int(spec.get("start_step", 0))
-        end = int(spec.get("end_step", start))
+        start = _integer(spec.get("start_step", 0), "start_step")
+        end = _integer(spec.get("end_step", start), "end_step")
         if start < 0 or end <= start:
             raise ValueError("fault window must satisfy 0 <= start_step < end_step")
+        spec.update(start_step=start, end_step=end)
     else:
-        probability = float(spec["probability"])
+        probability = _finite(spec["probability"], "probability")
         if not 0 <= probability <= 1 or not math.isfinite(probability):
             raise ValueError("probability must be finite and in [0, 1]")
         duration = spec.get("duration_range", spec.get("duration_steps", (1, 1)))
-        if isinstance(duration, int):
+        if isinstance(duration, Integral):
             duration = (duration, duration)
-        if len(duration) != 2 or int(duration[0]) < 1 or int(duration[1]) < int(duration[0]):
+        if not isinstance(duration, (tuple, list)) or len(duration) != 2:
             raise ValueError("duration_range must be (positive minimum, maximum)")
-    if fault_type == "drift" and not math.isfinite(float(spec.get("rate", spec.get("drift_per_step", 1.0)))):
-        raise ValueError("drift rate must be finite")
-    if fault_type == "spike" and "value" in spec and not math.isfinite(float(spec["value"])):
-        raise ValueError("spike value must be finite")
-    return dict(spec)
+        minimum, maximum = (_integer(item, "duration") for item in duration)
+        if minimum < 1 or maximum < minimum:
+            raise ValueError("duration_range must be (positive minimum, maximum)")
+        spec.update(probability=probability, duration_range=(minimum, maximum))
+    if fault_type == "drift":
+        spec["rate"] = _finite(spec.get("rate", spec.get("drift_per_step", 1.0)), "drift rate")
+    if fault_type == "spike":
+        if "value" in spec:
+            spec["value"] = _finite(spec["value"], "spike value")
+        else:
+            spec["offset"] = _finite(spec.get("offset", spec.get("magnitude", 1.0)), "spike offset")
+    return spec
 
 
 class FaultInjector:
@@ -84,44 +109,58 @@ class FaultInjector:
         self.config = config if isinstance(config, FaultConfig) else FaultConfig(**config)
         self._rng = random.Random(self.config.seed)
         self._events: list[tuple[dict[str, Any], int, int]] = []
+        self._probabilistic_specs = []
+        self._spec_order = {}
+        self._generated_step = -1
         self._last_good: dict[str, Any] = {}
         if self.config.enabled:
             self._build_events()
 
     def _build_events(self) -> None:
-        for raw in self.config.faults:
+        for index, raw in enumerate(self.config.faults):
             spec = _normalize_spec(raw)
+            self._spec_order[id(spec)] = index
             if "probability" not in spec:
                 start = int(spec.get("start_step", 0))
                 end = int(spec["end_step"])
                 self._events.append((spec, start, end))
                 continue
-            minimum, maximum = spec.get("duration_range", spec.get("duration_steps", (1, 1)))
-            minimum, maximum = int(minimum), int(maximum)
-            # The finite horizon is intentionally generous; apply() remains
-            # deterministic for normal day-sized (288 step) datasets.
-            for step in range(10000):
-                if self._rng.random() < float(spec["probability"]):
-                    duration = self._rng.randint(minimum, maximum)
-                    self._events.append((spec, step, step + duration))
+            self._probabilistic_specs.append(spec)
 
-    def _active(self, step: int, key: str) -> list[dict[str, Any]]:
-        return [spec for spec, start, end in self._events if start <= step < end and spec["key"] == key]
+    def _advance_events(self, step: int) -> None:
+        if step < self._generated_step:
+            raise ValueError("fault steps must be supplied in chronological order")
+        for current in range(self._generated_step + 1, step + 1):
+            self._events = [event for event in self._events if event[2] > current]
+            for spec in self._probabilistic_specs:
+                if self._rng.random() < spec["probability"]:
+                    duration = self._rng.randint(*spec["duration_range"])
+                    self._events.append((spec, current, current + duration))
+        self._generated_step = step
+
+    def _active(self, step: int, key: str) -> list[tuple]:
+        active = [event for event in self._events
+                  if event[1] <= step < event[2] and event[0]["key"] == key]
+        return sorted(active, key=lambda event: (self._spec_order[id(event[0])], event[1]))
 
     def apply(self, row: Mapping[str, Any], step: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """Return ``(observed_row, labels)`` for one timestep."""
+        """Return copied observations and labels; steps must be chronological."""
         if not isinstance(row, Mapping):
             raise TypeError("row must be a mapping")
         observed = dict(row)
         if not self.config.enabled:
             return observed, []
+        step = _integer(step, "step")
+        if step < 0:
+            raise ValueError("step must be non-negative")
+        self._advance_events(step)
         labels = []
         for key, true_value in row.items():
             active = self._active(int(step), key)
             if not active:
                 self._last_good[key] = true_value
                 continue
-            spec = active[0]
+            spec, start, _end = active[0]
             kind = spec["type"]
             if kind == "dropout":
                 observed.pop(key, None)
@@ -130,7 +169,7 @@ class FaultInjector:
                 value = float("nan")
                 observed[key] = value
             elif kind == "stuck":
-                value = self._last_good.get(key, true_value)
+                value = self._last_good.setdefault(key, true_value)
                 observed[key] = value
             elif kind == "spike":
                 if "value" in spec:
@@ -140,9 +179,10 @@ class FaultInjector:
                 observed[key] = value
             else:  # drift
                 rate = float(spec.get("rate", spec.get("drift_per_step", 1.0)))
-                start = next(start for candidate, start, end in self._events if candidate is spec and start <= step < end)
                 value = true_value + rate * (step - start + 1)
                 observed[key] = value
+            if kind in {"spike", "drift"}:
+                _finite(value, f"{kind} observed value")
             labels.append({"step": int(step), "key": key, "fault_type": kind,
                            "true_value": true_value, "observed_value": value})
         return observed, labels

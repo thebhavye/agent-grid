@@ -330,6 +330,13 @@ twins and checks allocation caps, charge/discharge exclusivity, power balance,
 and zero curtailment in discharge mode. Metrics and paired outcome scoring
 remain separate follow-up work.
 
+The fixed household base load participates as `household_base_load`, an
+always-on priority-1 bid, so it is included in allocation and battery balance.
+Physical limits and energy checks use unrounded SOC and solar power. EV
+service is recorded separately as `ev_applied_kw`, capped by physical charging
+headroom, and excluded from appliance totals to avoid counting it twice.
+Post-commit balance and SOC checks verify actual delivery, not just requests.
+
 ## Issue #64 — Sensor-only fault injection and labelled export
 Decision: implement faults as a deterministic observation wrapper around clean
 twin or generator rows. The wrapper supports dropout, NaN, stuck, spike, and
@@ -340,9 +347,8 @@ Why: Phase 6 needs repeatable labelled bad observations, while agents must keep
 their existing fail-fast validation behavior. Fault response policy and faults
 that alter device physics remain out of scope for this layer.
 
-The fixed household base load participates as `household_base_load`, an
-always-on priority-1 bid, so it is included in allocation and battery balance.
-Physical limits and energy checks use unrounded SOC and solar power. EV
-service is recorded separately as `ev_applied_kw`, capped by physical charging
-headroom, and excluded from appliance totals to avoid counting it twice.
-Post-commit balance and SOC checks verify actual delivery, not just requests.
+Fault configurations canonicalize aliases and validate integer boundaries,
+durations and finite numeric parameters before use. Probability events extend
+as chronological observations arrive, without a fixed horizon; expired events
+are discarded. The first configured active fault wins on overlap. A stuck
+sensor without a prior good sample freezes its first available reading.

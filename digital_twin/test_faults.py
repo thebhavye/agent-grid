@@ -7,6 +7,133 @@ from agents.battery_agent import BatteryAgent
 from digital_twin.faults import FaultConfig, FaultInjector, generate_fault_dataset
 
 
+def test_fault_type_alias_is_canonicalized():
+    injector = FaultInjector(FaultConfig(enabled=True, faults=[
+        {"fault_type": "spike", "key": "x", "start_step": 0, "end_step": 1,
+         "value": 150},
+    ]))
+    observed, labels = injector.apply({"x": 10.0}, 0)
+    assert observed["x"] == 150
+    assert labels[0]["fault_type"] == "spike"
+
+
+@pytest.mark.parametrize("duration_key", ["duration_range", "duration_steps"])
+def test_scalar_probability_duration_is_accepted(duration_key):
+    injector = FaultInjector(FaultConfig(enabled=True, faults=[
+        {"type": "spike", "key": "x", "probability": 1,
+         duration_key: 2, "offset": 10},
+    ]))
+    assert injector.apply({"x": 1.0}, 0)[0]["x"] == 11.0
+
+
+def test_stuck_from_first_step_freezes_initial_reading():
+    result = generate_fault_dataset(
+        [{"x": float(step)} for step in range(4)],
+        FaultConfig(enabled=True, faults=[
+            {"type": "stuck", "key": "x", "start_step": 0, "end_step": 3},
+        ]),
+    )
+    assert result["x_observed"].tolist() == [0.0, 0.0, 0.0, 3.0]
+    assert result["x_fault"].tolist() == ["stuck", "stuck", "stuck", "none"]
+
+
+def test_probability_faults_continue_beyond_old_horizon():
+    result = generate_fault_dataset(
+        ({"x": 1.0} for _ in range(10002)),
+        FaultConfig(enabled=True, faults=[
+            {"type": "spike", "key": "x", "probability": 1,
+             "duration_range": (1, 1), "offset": 10},
+        ]),
+    )
+    assert (result["x_observed"] == 11.0).all()
+    assert (result["x_fault"] == "spike").all()
+
+
+@pytest.mark.parametrize("extra", [
+    {"start_step": 0.5, "end_step": 2},
+    {"start_step": 0, "end_step": float("inf")},
+    {"probability": 1, "duration_range": (1.5, 2)},
+    {"probability": 1, "duration_range": None},
+    {"start_step": 0, "end_step": 2, "offset": float("nan")},
+    {"start_step": 0, "end_step": 2, "offset": float("inf")},
+])
+def test_invalid_fault_parameters_fail_at_configuration(extra):
+    with pytest.raises(ValueError):
+        FaultConfig(enabled=True, faults=[{"type": "spike", "key": "x", **extra}])
+
+
+@pytest.mark.parametrize("kind", ["dropout", "nan", "stuck", "spike", "drift"])
+def test_half_open_boundaries_and_label_values(kind):
+    rows = [{"x": float(step)} for step in range(4)]
+    injector = FaultInjector(FaultConfig(enabled=True, faults=[
+        {"type": kind, "key": "x", "start_step": 1, "end_step": 3},
+    ]))
+    for step, row in enumerate(rows):
+        observed, labels = injector.apply(row, step)
+        assert row == {"x": float(step)}
+        if step in (0, 3):
+            assert observed == row and labels == []
+        else:
+            assert labels[0]["true_value"] == float(step)
+            assert labels[0]["fault_type"] == kind
+            if kind == "dropout":
+                assert "x" not in observed and labels[0]["observed_value"] is None
+            elif kind == "nan":
+                assert math.isnan(observed["x"]) and math.isnan(labels[0]["observed_value"])
+            else:
+                assert labels[0]["observed_value"] == observed["x"]
+                assert math.isfinite(observed["x"])
+                if kind == "stuck":
+                    assert observed["x"] == 0.0
+                elif kind == "drift":
+                    assert observed["x"] == float(step + step)
+                else:
+                    assert observed["x"] == float(step + 1)
+
+
+def test_probabilistic_day_is_deterministic_without_changing_source():
+    rows = [{"x": float(step), "y": 50.0} for step in range(288)]
+    original = [dict(row) for row in rows]
+    specs = [
+        {"type": "drift", "key": "x", "probability": 0.4,
+         "duration_range": (2, 4), "rate": 0.5},
+        {"type": "nan", "key": "y", "probability": 0.2,
+         "duration_range": (1, 3)},
+    ]
+    config = FaultConfig(enabled=True, seed=42, faults=specs)
+    first = generate_fault_dataset(rows, config)
+    second = generate_fault_dataset(rows, config)
+    pd.testing.assert_frame_equal(first, second)
+    assert rows == original
+    assert set(first["x_fault"]) == {"none", "drift"}
+    assert set(first["y_fault"]) == {"none", "nan"}
+    assert not first.loc[first["y_fault"] == "none", "y_observed"].isna().any()
+    assert first.loc[first["y_fault"] == "nan", "y_observed"].isna().all()
+    assert all("start_step" not in spec for spec in specs)
+
+
+def test_disabled_pass_through_for_a_complete_twin_day():
+    from digital_twin.test_digital_twin import make_test_twin
+
+    rows = make_test_twin(seed=42).run_full_day()
+    injector = FaultInjector(FaultConfig())
+    for step, row in enumerate(rows):
+        observed, labels = injector.apply(row, step)
+        assert observed == row and observed is not row
+        assert labels == []
+
+
+def test_backward_steps_are_rejected_without_restarting_fault_stream():
+    injector = FaultInjector(FaultConfig(enabled=True, faults=[
+        {"type": "spike", "key": "x", "probability": 1,
+         "duration_range": (1, 1)},
+    ]))
+    injector.apply({"x": 1.0}, 1)
+    with pytest.raises(ValueError, match="chronological"):
+        injector.apply({"x": 1.0}, 0)
+    assert injector.apply({"x": 1.0}, 2)[0] == {"x": 2.0}
+
+
 def test_fixed_faults_labels_and_input_are_clean():
     row = {"battery_soc_pct": 50.0, "solar_gen_kw": 2.0}
     original = dict(row)

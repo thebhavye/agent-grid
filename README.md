@@ -118,6 +118,9 @@ to `generate_fault_dataset(rows, config, output_path="faults.csv")`.
 Supported fault types are `dropout`, `nan`, `stuck`, `spike`, and `drift`.
 Fixed windows use `start_step` and exclusive `end_step`; probabilistic faults use
 `probability` and `duration_range`.
+Apply rows in chronological step order; use a new injector to replay a run.
+Probability events are generated as needed, with no fixed dataset-length cap.
+If faults overlap on the same key, the first configured active fault wins.
 
 The returned DataFrame has one row per input step and these columns:
 
