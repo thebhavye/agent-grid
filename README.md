@@ -109,6 +109,26 @@ an agent/allocator actually needs both — don't materialize the join in the sto
 Generator: `data/generate_dataset.py`, entry point `generate_dataset(seed=None) -> dict[str, pd.DataFrame]`.
 Sanity plot: run `python data/generate_dataset.py` directly → solar/load/EV SOC over the day.
 
+### Sensor fault datasets
+
+`digital_twin.faults` adds optional, deterministic sensor faults without changing
+the clean twin or generator rows. Configure `FaultConfig(enabled=True, seed=0,
+faults=[...])` and pass rows (a list of dictionaries or a timeseries DataFrame)
+to `generate_fault_dataset(rows, config, output_path="faults.csv")`.
+Supported fault types are `dropout`, `nan`, `stuck`, `spike`, and `drift`.
+Fixed windows use `start_step` and exclusive `end_step`; probabilistic faults use
+`probability` and `duration_range`.
+
+The returned DataFrame has one row per input step and these columns:
+
+- `step`
+- `<key>_clean` — the original value
+- `<key>_observed` — the value presented to an agent (or blank for dropout)
+- `<key>_fault` — the fault type, or `none` when the sensor is clean
+
+The optional `output_path` writes the same columns to CSV. With `enabled=False`,
+`FaultInjector.apply()` is an exact observation pass-through and emits no labels.
+
 ## Digital Twin (implemented, standalone)
 
 In addition to the static synthetic dataset (`data/generate_dataset.py`), AgentGrid now has a live

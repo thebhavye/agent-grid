@@ -329,3 +329,13 @@ power, and post-commit SOC state. The runner rejects stale or non-closed-loop
 twins and checks allocation caps, charge/discharge exclusivity, power balance,
 and zero curtailment in discharge mode. Metrics and paired outcome scoring
 remain separate follow-up work.
+
+## Issue #64 — Sensor-only fault injection and labelled export
+Decision: implement faults as a deterministic observation wrapper around clean
+twin or generator rows. The wrapper supports dropout, NaN, stuck, spike, and
+drift faults, with fixed half-open step windows or seeded probability/duration
+events. `generate_fault_dataset()` exports clean, observed, and per-key fault
+columns without changing the source rows or simulation physics.
+Why: Phase 6 needs repeatable labelled bad observations, while agents must keep
+their existing fail-fast validation behavior. Fault response policy and faults
+that alter device physics remain out of scope for this layer.
