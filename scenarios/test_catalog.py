@@ -13,7 +13,7 @@ import requests
 from digital_twin import weather_client
 from digital_twin.solar_model import SolarModel
 from scenarios import CATALOG, build_twin, list_scenarios
-from simulation.closed_loop import run_closed_loop
+from simulation.closed_loop import proportional_adapter, run_closed_loop
 from simulation.hybrid_arbiter import hybrid_allocate
 
 
@@ -28,9 +28,9 @@ def offline_only(monkeypatch):
     monkeypatch.setattr(weather_client, "_cache", {})
 
 
-def test_catalog_contains_all_seven_scenarios():
+def test_catalog_contains_all_eight_scenarios():
     expected = {"clear_day", "monsoon_cloudy", "heatwave", "low_battery_start",
-                "degraded_battery", "overnight_ev_cloudy", "three_days"}
+                "degraded_battery", "overnight_ev_cloudy", "three_days", "demo_sunny_home"}
     assert set(list_scenarios()) == expected
     assert list_scenarios() == sorted(expected)
     names = list_scenarios()
@@ -155,3 +155,32 @@ def test_saved_weather_paths_do_not_depend_on_working_directory(tmp_path, monkey
     monkeypatch.chdir(tmp_path)
     twin = build_twin("clear_day")
     assert len(twin.run_full_day(steps=2)) == 2
+
+
+@pytest.mark.parametrize("name", ["clear_day", "monsoon_cloudy", "heatwave",
+                                  "low_battery_start", "degraded_battery",
+                                  "overnight_ev_cloudy", "three_days"])
+@pytest.mark.parametrize("closed_loop", [False, True])
+def test_original_scenarios_exactly_match_legacy_solar_defaults(name, closed_loop):
+    current = build_twin(name, closed_loop=closed_loop)
+    legacy = build_twin(name, closed_loop=closed_loop)
+    # Previously no solar_config was supplied: SolarModel() is the reference.
+    legacy._solar = SolarModel()
+    assert current._solar.config == legacy._solar.config
+    steps = CATALOG[name]["steps"]
+    assert current.run_full_day(steps=steps) == legacy.run_full_day(steps=steps)
+
+
+@pytest.mark.parametrize("allocator", [hybrid_allocate, proportional_adapter])
+def test_demo_sunny_home_has_visible_battery_cycling_offline(allocator):
+    twin = build_twin("demo_sunny_home", closed_loop=True)
+    assert twin._solar.config.panel_area_m2 == 60.0
+    assert twin._solar.config.panel_efficiency == 0.20
+    assert twin._battery.soc_pct == 50.0
+    assert twin._battery.capacity_kwh == 12.0
+    records = run_closed_loop(twin, allocator, steps=CATALOG["demo_sunny_home"]["steps"])
+    assert len(records) == 288
+    assert sum(max(0, row["battery_kw"]) * row["dt_min"] / 60 for row in records) > 5
+    assert max(row["battery_soc_pct"] for row in records
+               if "12:00" <= row["timestamp"] < "18:00") > 80
+    assert any(row["battery_kw"] < 0 for row in records)
