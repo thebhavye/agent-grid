@@ -823,6 +823,28 @@ class TestApplianceModel:
 # ---------------------------------------------------------------------------
 
 class TestDigitalTwin:
+    @pytest.mark.parametrize("start", [
+        datetime(2024, 1, 15, 7, 5),
+        datetime(2024, 1, 15, 23, 59, 30, tzinfo=timezone.utc),
+    ])
+    def test_closed_loop_mixed_steps_sample_interval_start(self, start):
+        twin = self._closed_twin(seed=7)
+        for _ in range(2):
+            twin.reset(start)
+            for dt in (15, 2.5, 5, 0.25):
+                before = twin.current_time
+                minute = (before.hour * 60 + before.minute
+                          + before.second / 60 + before.microsecond / 60_000_000)
+                obs = twin.observe(dt)
+                assert twin._ev.current_minute == pytest.approx(minute)
+                assert twin._appliances.current_minute == pytest.approx(minute)
+                assert twin.current_time == before
+                if before.hour == 7 and before.minute == 5:
+                    assert obs["ev_plugged_in"] is True
+                row = twin.commit({})
+                assert row["timestamp"] == before.strftime("%H:%M")
+                assert twin.current_time == before + timedelta(minutes=dt)
+
     @staticmethod
     def _closed_twin(seed=7, scenario=EVScenario.OVERNIGHT, **overrides):
         client, _ = _mock_client()
@@ -904,6 +926,67 @@ class TestDigitalTwin:
                                   / twin._battery.capacity_kwh * 100)
         assert row["battery_applied_kw"] == pytest.approx(3.0)
         assert twin._battery.soc_pct == pytest.approx(expected_soc)
+
+    @pytest.mark.parametrize("soc,power", [(100, 3), (0, -3), (99.9, 6), (0.1, -12)])
+    def test_closed_loop_battery_reports_transferred_power(self, soc, power):
+        twin = self._closed_twin(battery_config=BatteryModelConfig(initial_soc_pct=soc))
+        twin.observe()
+        row = twin.commit({"battery_1": power})
+        cfg = twin._battery.config
+        delta = (twin._battery.soc_pct - soc) / 100 * cfg.capacity_kwh
+        expected = delta / cfg.charge_efficiency if delta >= 0 else delta * cfg.discharge_efficiency
+        assert row["battery_applied_kw"] == pytest.approx(expected * 12)
+        assert abs(row["battery_applied_kw"]) < abs(power)
+
+    @pytest.mark.parametrize("rate,soc,requested", [(7, 50, 7), (2, 50, 7), (7, 99.9, 7), (7, 100, 7)])
+    def test_closed_loop_ev_has_one_energy_record(self, rate, soc, requested):
+        twin = self._closed_twin(ev_config=EVModelConfig(scenario=EVScenario.OVERNIGHT,
+                                                       max_charge_kw=rate))
+        observation = twin.observe()
+        twin._ev._soc_pct = soc
+        row = twin.commit({"ev_1": requested})
+        cfg = twin._ev.config
+        expected = (twin._ev.soc_pct - soc) / 100 * cfg.battery_capacity_kwh / cfg.charge_efficiency * 12
+        assert row["ev_applied_kw"] == pytest.approx(expected)
+        assert row["ev_applied_kw"] <= rate + 1e-10
+        assert "ev_charger" not in observation["appliance_desired_kw"]
+        assert "ev_charger" not in row["appliance_served_kw"]
+
+    def test_rejected_commit_keeps_interval_retryable(self):
+        twin = self._closed_twin(scenario=EVScenario.MIDDAY)
+        twin.observe()
+        before = (twin.current_time, twin._battery.soc_pct, twin._ev.soc_pct,
+                  twin._appliances.get_appliance_state("fridge").copy())
+        for delivery in ({"appliance_ev_charger": 2}, {"ev_1": 2}, {"battery_1": float("nan")}):
+            with pytest.raises(ValueError):
+                twin.commit(delivery)
+            assert before == (twin.current_time, twin._battery.soc_pct, twin._ev.soc_pct,
+                              twin._appliances.get_appliance_state("fridge"))
+            assert twin.step_count == 0
+        twin.commit({})
+        assert twin.step_count == 1
+
+    @pytest.mark.parametrize("dt", [0, -1, float("nan"), float("inf"), -float("inf")])
+    def test_closed_loop_bad_timestep_does_not_advance_schedule(self, dt):
+        twin = self._closed_twin()
+        before = (twin._ev.current_minute, twin._appliances.rng_draw_count)
+        with pytest.raises(ValueError):
+            twin.observe(dt)
+        assert before == (twin._ev.current_minute, twin._appliances.rng_draw_count)
+        twin.observe()
+        twin.commit({})
+
+    def test_closed_loop_reset_replays_deliveries(self):
+        twin = self._closed_twin()
+        def run():
+            rows = []
+            for _ in range(288):
+                obs = twin.observe()
+                rows.append(twin.commit({"ev_1": 2 if obs["ev_plugged_in"] else 0}))
+            return rows
+        first = run()
+        twin.reset()
+        assert run() == first
 
     def test_closed_loop_ev_delivery_and_unplugged_guard(self):
         twin = self._closed_twin(seed=42)

@@ -144,6 +144,9 @@ class DigitalTwin:
             raise RuntimeError("observe() requires commit() before the next observation")
         if time_delta_min is None:
             time_delta_min = self._time_delta_min
+        if not math.isfinite(time_delta_min) or time_delta_min <= 0:
+            raise ValueError("time_delta_min must be finite and positive")
+        next_time = self._current_time + timedelta(minutes=time_delta_min)
 
         timestamp = self._current_time.strftime("%H:%M")
         irradiance, ambient_temp, _cloudcover = self._get_weather_for_current_time()
@@ -152,9 +155,19 @@ class DigitalTwin:
         )
 
         if self._closed_loop:
+            # Submodels advance before sampling; anchor that sample to this
+            # interval's start even when its duration differs from the last.
+            minute = (
+                self._current_time.hour * 60 + self._current_time.minute
+                + self._current_time.second / 60
+                + self._current_time.microsecond / 60_000_000
+            )
+            self._appliances._current_minute = minute - time_delta_min
+            self._ev._current_minute = minute - time_delta_min
             appliance_result = self._appliances.observe(time_delta_min)
             ev_result = self._ev.observe(time_delta_min)
             desired = dict(appliance_result["appliance_desired_kw"])
+            desired.pop("ev_charger", None)
         else:
             # Keep the legacy schedule path unchanged. Only battery physics
             # is deferred to commit(), so the default tick output is stable.
@@ -167,6 +180,7 @@ class DigitalTwin:
 
         household_load_kw = appliance_result["total_load_kw"]
         self._pending_observation = {
+            "next_time": next_time,
             "time_delta_min": time_delta_min,
             "timestamp": timestamp,
             "ambient_temp": ambient_temp,
@@ -193,6 +207,7 @@ class DigitalTwin:
         allowed.update(
             f"appliance_{spec.appliance_id}"
             for spec in self._appliances.config.appliances
+            if spec.appliance_id != "ev_charger"
         )
         unknown = set(delivered) - allowed
         if unknown:
@@ -274,9 +289,16 @@ class DigitalTwin:
             row["appliance_served_kw"] = dict(
                 appliance_result.get("appliance_served_kw", {})
             )
-            row["battery_applied_kw"] = float(battery_result["charge_power_kw"])
+            dt_hours = time_delta_min / 60.0
+            row["battery_applied_kw"] = float(
+                battery_result["energy_charged_kwh"]
+                / self._battery.config.charge_efficiency / dt_hours
+                - battery_result["energy_discharged_kwh"]
+                * self._battery.config.discharge_efficiency / dt_hours
+            )
+            row["ev_applied_kw"] = float(ev_result["charging_kw"])
 
-        self._current_time += timedelta(minutes=time_delta_min)
+        self._current_time = pending["next_time"]
         self._step_count += 1
         self._pending_observation = None
         return row

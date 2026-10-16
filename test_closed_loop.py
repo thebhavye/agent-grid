@@ -32,6 +32,7 @@ def test_closed_loop_runs_all_scenarios_and_preserves_invariants(
 
     assert len(records) == 288
     assert twin.step_count == 288
+    previous_battery_soc = twin._battery.config.initial_soc_pct
     for record in records:
         agents = record["agents"]
         assert set(record["demand_kw"]) == set(agents)
@@ -46,7 +47,19 @@ def test_closed_loop_runs_all_scenarios_and_preserves_invariants(
             if agent_id not in {"solar_1", "battery_1"}
         )
         battery_kw = record["battery_kw"]
-        assert not (battery_kw > 1e-9 and battery_kw < -1e-9)
+        assert record["ev_applied_kw"] == pytest.approx(record["allocated_kw"]["ev_1"])
+        assert loads == pytest.approx(
+            sum(record["appliance_served_kw"].values()) + record["ev_applied_kw"]
+            + record["allocated_kw"]["household_base_load"]
+        )
+        cfg = twin._battery.config
+        delta_kwh = battery_kw * record["dt_min"] / 60
+        delta_kwh *= cfg.charge_efficiency if battery_kw >= 0 else 1 / cfg.discharge_efficiency
+        assert record["battery_soc_pct"] == pytest.approx(
+            previous_battery_soc + delta_kwh / cfg.capacity_kwh * 100, abs=1e-9
+        )
+        assert record["battery_soc_pct"] >= 20 - 1e-9
+        previous_battery_soc = record["battery_soc_pct"]
         assert record["solar_kw"] + max(0.0, -battery_kw) == pytest.approx(
             loads + max(0.0, battery_kw) + record["curtailed_kw"],
             abs=1e-9,
@@ -102,10 +115,55 @@ def test_closed_loop_overnight_ev_receives_evening_power():
     evening = [
         record for record in records
         if record["timestamp"] >= "19:00"
-        and record["appliances"]["ev_charger"]["desired_kw"] > 0
+        and record["ev_plugged_in"]
     ]
     assert evening
-    assert any(record["appliances"]["ev_charger"]["served_kw"] > 0 for record in evening)
+    assert any(record["ev_applied_kw"] > 0 for record in evening)
+    assert all("ev_charger" not in record["appliances"] for record in records)
+
+
+@pytest.mark.parametrize("allocator", ALLOCATORS)
+@pytest.mark.parametrize("base_kw", [0.0, 0.6, 1.2])
+def test_base_load_is_bid_and_included_in_actual_power_balance(allocator, base_kw):
+    twin = make_test_twin(
+        closed_loop=True,
+        ev_config=EVModelConfig(scenario=EVScenario.MIDDAY),
+        appliance_config=ApplianceModelConfig(appliances=[], base_load_kw=base_kw),
+    )
+    before = twin._battery.available_energy_kwh
+    record = run_closed_loop(twin, allocator, steps=1)[0]
+    assert record["demand_kw"]["household_base_load"] == base_kw
+    assert record["allocated_kw"]["household_base_load"] == pytest.approx(base_kw)
+    assert record["battery_kw"] == pytest.approx(-base_kw)
+    assert before - twin._battery.available_energy_kwh == pytest.approx(
+        base_kw * record["dt_min"] / 60 / twin._battery.config.discharge_efficiency
+    )
+
+
+@pytest.mark.parametrize("dt", [0.25, 5.0, 15.0, 60.0])
+def test_supply_does_not_round_soc_above_reserve(dt):
+    twin = make_test_twin(
+        closed_loop=True, time_delta_min=dt,
+        battery_config=BatteryModelConfig(initial_soc_pct=20.006),
+    )
+    run_closed_loop(twin, hybrid_allocate, steps=1)
+    assert twin._battery.soc_pct >= 20.0 - 1e-10
+
+
+@pytest.mark.parametrize("allocator", ALLOCATORS)
+def test_ev_delivery_is_capped_by_physical_headroom(allocator):
+    twin = make_test_twin(
+        closed_loop=True,
+        ev_config=EVModelConfig(scenario=EVScenario.OVERNIGHT, seed=1,
+                               battery_capacity_kwh=0.01),
+    )
+    before = twin._ev.soc_pct
+    record = run_closed_loop(twin, allocator, steps=1)[0]
+    actual_kw = ((twin._ev.soc_pct - before) / 100
+                 * twin._ev.config.battery_capacity_kwh
+                 / twin._ev.config.charge_efficiency / (record["dt_min"] / 60))
+    assert record["allocated_kw"]["ev_1"] == pytest.approx(actual_kw)
+    assert record["ev_applied_kw"] == pytest.approx(actual_kw)
 
 
 def test_closed_loop_requires_fresh_closed_loop_twin():

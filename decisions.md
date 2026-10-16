@@ -339,3 +339,10 @@ columns without changing the source rows or simulation physics.
 Why: Phase 6 needs repeatable labelled bad observations, while agents must keep
 their existing fail-fast validation behavior. Fault response policy and faults
 that alter device physics remain out of scope for this layer.
+
+The fixed household base load participates as `household_base_load`, an
+always-on priority-1 bid, so it is included in allocation and battery balance.
+Physical limits and energy checks use unrounded SOC and solar power. EV
+service is recorded separately as `ev_applied_kw`, capped by physical charging
+headroom, and excluded from appliance totals to avoid counting it twice.
+Post-commit balance and SOC checks verify actual delivery, not just requests.
