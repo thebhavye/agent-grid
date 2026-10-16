@@ -19,10 +19,12 @@ Scenarios (matching generate_dataset.py):
 Charging: linear ramp to target SOC over plugged-in period (80% of duration).
 """
 
+import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
+from numbers import Real
 from typing import Optional
 
 
@@ -35,11 +37,26 @@ class EVScenario(str, Enum):
 
 @dataclass
 class EVSegment:
-    """A single plugged-in charging segment."""
-    start_min: float      # Minute of day when plugging in
-    end_min: float        # Minute of day when unplugging (departure)
+    """A half-open charging interval within one day.
+
+    Represent 23:30 -> 06:00 with sorted intervals [0, 360) and [1410, 1440),
+    as in the built-in overnight scenario. A continuous midnight connection
+    does not reset SOC. The two intervals describe one overnight connection.
+    """
+    plug_in_min: float
+    departure_min: float
     start_soc: float      # SOC at plug-in
     target_soc: float     # Target SOC at departure
+
+    @property
+    def start_min(self) -> float:
+        """Existing model name for the plug-in minute."""
+        return self.plug_in_min
+
+    @property
+    def end_min(self) -> float:
+        """Existing model name for the departure minute."""
+        return self.departure_min
 
 
 @dataclass
@@ -53,12 +70,15 @@ class EVModelConfig:
         battery_capacity_kwh: EV battery capacity (kWh). Default 60 kWh.
         max_charge_kw: Maximum charge power (kW). Default 7.0 kW.
         charge_efficiency: Charging efficiency (0-1). Default 0.90.
+        segments: Sorted, non-overlapping day intervals, or None to retain
+            random scenario generation. Custom intervals override scenario.
     """
     scenario: Optional[EVScenario] = None
     seed: Optional[int] = 42
     battery_capacity_kwh: float = 60.0
     max_charge_kw: float = 7.0
     charge_efficiency: float = 0.90
+    segments: Optional[list[EVSegment]] = None
 
     def __post_init__(self):
         if self.battery_capacity_kwh <= 0:
@@ -67,6 +87,25 @@ class EVModelConfig:
             raise ValueError("max_charge_kw must be positive")
         if not 0 < self.charge_efficiency <= 1:
             raise ValueError("charge_efficiency must be in (0, 1]")
+        if self.segments is not None:
+            if not isinstance(self.segments, list) or not self.segments:
+                raise ValueError("segments must be a non-empty list of EVSegment values")
+            previous_end = 0.0
+            for index, segment in enumerate(self.segments):
+                if not isinstance(segment, EVSegment):
+                    raise ValueError(f"segments[{index}] must be an EVSegment")
+                for name in ("plug_in_min", "departure_min", "start_soc", "target_soc"):
+                    value = getattr(segment, name)
+                    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
+                        raise ValueError(f"segments[{index}].{name} must be a finite number")
+                if not 0 <= segment.plug_in_min < segment.departure_min <= 1440:
+                    raise ValueError(f"segments[{index}] requires 0 <= plug_in_min < departure_min <= 1440")
+                if segment.plug_in_min < previous_end:
+                    raise ValueError("segments must be sorted and non-overlapping")
+                if not (0 <= segment.start_soc <= 100 and 0 <= segment.target_soc <= 100):
+                    raise ValueError(f"segments[{index}] SOC must be in [0, 100]")
+                previous_end = segment.departure_min
+            self.segments = [replace(segment) for segment in self.segments]
 
 
 class EVModel:
@@ -82,13 +121,18 @@ class EVModel:
         self._rng = random.Random(self.config.seed)
 
         # Initialize scenario
-        if self.config.scenario is None:
+        if self.config.segments is not None:
+            self._scenario = "custom"
+        elif self.config.scenario is None:
             self._scenario = self._rng.choice(list(EVScenario))
         else:
             self._scenario = self.config.scenario
 
         # Generate segments for this scenario
-        self._segments = self._generate_segments()
+        self._segments = (
+            [replace(segment) for segment in self.config.segments]
+            if self.config.segments is not None else self._generate_segments()
+        )
         self._departure_min = self._calculate_departure_min()
 
         # State
@@ -309,7 +353,7 @@ class EVModel:
         return self._plugged_in
 
     @property
-    def scenario(self) -> EVScenario:
+    def scenario(self) -> EVScenario | str:
         return self._scenario
 
     @property
@@ -334,4 +378,5 @@ class EVModel:
             battery_capacity_kwh=self.config.battery_capacity_kwh,
             max_charge_kw=self.config.max_charge_kw,
             charge_efficiency=self.config.charge_efficiency,
+            segments=self.config.segments,
         ))
