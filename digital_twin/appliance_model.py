@@ -16,6 +16,7 @@ The model simulates each appliance's on/off state based on time-of-day
 and usual windows, with some stochastic variation.
 """
 
+import hashlib
 import random
 from dataclasses import dataclass
 from datetime import datetime
@@ -84,13 +85,37 @@ class ApplianceModelConfig:
 class ApplianceModel:
     """Stateful household appliance/load model."""
 
-    def __init__(self, config: Optional[ApplianceModelConfig] = None):
+    def __init__(
+        self,
+        config: Optional[ApplianceModelConfig] = None,
+        closed_loop: bool = False,
+    ):
         """
         Args:
             config: ApplianceModelConfig instance. If None, uses defaults.
         """
         self.config = config or ApplianceModelConfig()
+        self._closed_loop = bool(closed_loop)
         self._rng = random.Random(self.config.seed)
+
+        # Closed-loop runs use one stable stream per appliance.  The legacy
+        # mode intentionally keeps the original shared RNG untouched so the
+        # pre-Phase-2 tick output remains byte-for-byte compatible.
+        self._appliance_rngs: dict[str, random.Random] = {}
+        self._rng_draw_count = 0
+        self._cycle_start_times: dict[str, list[float]] = {}
+        self._drawn_cycle_start_times: dict[str, list[float]] = {}
+        self._blocked_starts: dict[str, int] = {}
+        if self._closed_loop:
+            for spec in self.config.appliances:
+                self._cycle_start_times[spec.appliance_id] = []
+                self._drawn_cycle_start_times[spec.appliance_id] = []
+                self._blocked_starts[spec.appliance_id] = 0
+                seed_material = f"{self.config.seed!r}:{spec.appliance_id}".encode()
+                stable_seed = int.from_bytes(
+                    hashlib.sha256(seed_material).digest()[:8], "big"
+                )
+                self._appliance_rngs[spec.appliance_id] = random.Random(stable_seed)
 
         # Per-appliance state
         self._appliance_states: dict[str, dict] = {}
@@ -163,16 +188,142 @@ class ApplianceModel:
                 state["is_on"] = True
                 state["time_remaining_min"] = 0.0
             else:
-                # For deferable, randomly decide if running at start time
+                # For deferable, randomly decide if running at start time.
+                # Closed-loop mode consumes a fixed pair of draws per
+                # appliance, regardless of whether the start is usable.
                 in_window = self._in_usual_window(spec, self._current_minute)
-                if in_window and self._rng.random() < 0.3:
-                    state["is_on"] = True
-                    state["time_remaining_min"] = self._rng.uniform(
-                        spec.min_runtime_min, spec.max_runtime_min
+                if self._closed_loop:
+                    start_roll = self._draw_random(spec.appliance_id)
+                    runtime = self._draw_uniform(
+                        spec.appliance_id, spec.min_runtime_min, spec.max_runtime_min
                     )
+                else:
+                    runtime = None
+                    start_roll = self._rng.random() if in_window else 1.0
+
+                if in_window and start_roll < 0.3:
+                    if runtime is None:
+                        runtime = self._rng.uniform(
+                            spec.min_runtime_min, spec.max_runtime_min
+                        )
+                    state["is_on"] = True
+                    state["time_remaining_min"] = runtime
+                    if self._closed_loop:
+                        self._cycle_start_times[spec.appliance_id].append(
+                            self._current_minute
+                        )
+                        self._drawn_cycle_start_times[spec.appliance_id].append(
+                            self._current_minute
+                        )
                 else:
                     state["is_on"] = False
                     state["time_remaining_min"] = 0.0
+
+    def _draw_random(self, appliance_id: str) -> float:
+        """Draw from an appliance-local RNG and count the draw."""
+        self._rng_draw_count += 1
+        return self._appliance_rngs[appliance_id].random()
+
+    def _draw_uniform(self, appliance_id: str, low: float, high: float) -> float:
+        """Draw a runtime from an appliance-local RNG and count the draw."""
+        self._rng_draw_count += 1
+        return self._appliance_rngs[appliance_id].uniform(low, high)
+
+    def _observe_closed_loop(self, time_delta_min: float) -> dict:
+        """Advance schedule decisions without consuming cycle runtime."""
+        self._current_minute = (self._current_minute + time_delta_min) % 1440
+
+        for spec in self.config.appliances:
+            if not spec.deferable:
+                continue
+
+            state = self._appliance_states[spec.appliance_id]
+            start_roll = self._draw_random(spec.appliance_id)
+            runtime = self._draw_uniform(
+                spec.appliance_id, spec.min_runtime_min, spec.max_runtime_min
+            )
+            if not self._in_usual_window(spec, self._current_minute):
+                continue
+
+            prob_per_step = spec.cycle_prob_per_hour * (time_delta_min / 60.0)
+            if start_roll >= prob_per_step:
+                continue
+
+            self._drawn_cycle_start_times[spec.appliance_id].append(
+                self._current_minute
+            )
+            if state["is_on"] or state["time_remaining_min"] > 0:
+                self._blocked_starts[spec.appliance_id] += 1
+                continue
+
+            state["is_on"] = True
+            state["time_remaining_min"] = runtime
+            self._cycle_start_times[spec.appliance_id].append(self._current_minute)
+
+        return self._current_result()
+
+    def _current_result(self) -> dict:
+        """Return desired loads for the current schedule state."""
+        total_load = self.config.base_load_kw
+        appliance_loads = {}
+        desired = {}
+        active = []
+        for spec in self.config.appliances:
+            state = self._appliance_states[spec.appliance_id]
+            load = spec.power_kw if state["is_on"] else 0.0
+            appliance_loads[spec.appliance_id] = load
+            desired[spec.appliance_id] = load
+            if spec.appliance_id not in EXCLUDED_FROM_HOUSEHOLD_TOTAL:
+                total_load += load
+            if state["is_on"]:
+                active.append(spec.appliance_id)
+        return {
+            "total_load_kw": total_load,
+            "appliance_loads": appliance_loads,
+            "active_appliances": active,
+            "appliance_desired_kw": desired,
+        }
+
+    def observe(self, time_delta_min: float = 5.0) -> dict:
+        """Advance schedule state and return desired loads without progress."""
+        if not self._closed_loop:
+            raise RuntimeError("observe() requires closed-loop appliance mode")
+        return self._observe_closed_loop(time_delta_min)
+
+    def commit(self, time_delta_min: float, delivered: Optional[dict] = None) -> dict:
+        """Apply delivered appliance power and proportionally complete cycles."""
+        if not self._closed_loop:
+            raise RuntimeError("commit() requires closed-loop appliance mode")
+
+        autonomous = delivered is None
+        delivered = delivered or {}
+        current = self._current_result()
+        served = {}
+        for spec in self.config.appliances:
+            # EVModel owns charging; the roster entry is display-only.
+            if spec.appliance_id == "ev_charger":
+                continue
+            desired = current["appliance_loads"][spec.appliance_id]
+            requested = (
+                desired if autonomous
+                else delivered.get(f"appliance_{spec.appliance_id}", 0.0)
+            )
+            served_kw = min(max(0.0, float(requested)), desired)
+            served[spec.appliance_id] = served_kw
+
+            state = self._appliance_states[spec.appliance_id]
+            if spec.deferable and state["is_on"] and desired > 0.0:
+                progress = time_delta_min * served_kw / desired
+                state["time_remaining_min"] -= progress
+                if state["time_remaining_min"] <= 0.0:
+                    state["is_on"] = False
+                    state["time_remaining_min"] = 0.0
+
+        result = self._current_result()
+        result["appliance_desired_kw"] = dict(current["appliance_desired_kw"])
+        result["appliance_desired_kw"].pop("ev_charger", None)
+        result["appliance_served_kw"] = served
+        return result
 
     def tick(self, time_delta_min: float = 5.0) -> dict:
         """Advance simulation by one timestep.
@@ -219,6 +370,28 @@ class ApplianceModel:
         }
 
     @property
+    def rng_draw_count(self) -> int:
+        """Number of closed-loop schedule RNG draws made so far."""
+        return self._rng_draw_count
+
+    @property
+    def cycle_start_times(self) -> dict[str, list[float]]:
+        """Actual cycle starts, copied so callers cannot mutate state."""
+        return {key: list(value) for key, value in self._cycle_start_times.items()}
+
+    @property
+    def drawn_cycle_start_times(self) -> dict[str, list[float]]:
+        """Successful start draws, including starts blocked by a running cycle."""
+        return {
+            key: list(value) for key, value in self._drawn_cycle_start_times.items()
+        }
+
+    @property
+    def blocked_starts(self) -> dict[str, int]:
+        """Count of successful start draws skipped while an appliance was busy."""
+        return dict(self._blocked_starts)
+
+    @property
     def current_minute(self) -> float:
         return self._current_minute
 
@@ -253,4 +426,4 @@ class ApplianceModel:
             seed=effective_seed,
             appliances=self.config.appliances,
             base_load_kw=self.config.base_load_kw,
-        ))
+        ), closed_loop=self._closed_loop)

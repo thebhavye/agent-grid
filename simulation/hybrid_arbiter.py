@@ -8,7 +8,7 @@ from .baseline_allocator import _require_valid_kw, allocate
 
 
 def hybrid_allocate(available_power_kw, bids, priorities) -> dict[str, float]:
-    """Serve priority 1-2 first, proportionally when critical power is short.
+    """Serve priority 1, then priority 2, proportionally within each group.
 
     Flexible bids follow in descending urgency order. Urgencies within
     1e-9 of the highest urgency in a band tie; within each band, lower
@@ -23,7 +23,7 @@ def hybrid_allocate(available_power_kw, bids, priorities) -> dict[str, float]:
     """
     remaining = _require_valid_kw(available_power_kw, "available_power_kw")
     demands = {}
-    critical = []
+    critical = {1: [], 2: []}
     flexible = []
     for bid in bids:
         agent_id = bid["agent_id"]
@@ -38,13 +38,13 @@ def hybrid_allocate(available_power_kw, bids, priorities) -> dict[str, float]:
         if isinstance(priority, bool) or not isinstance(priority, Integral) or not 1 <= priority <= 5:
             raise ValueError(f"priority for {agent_id!r} must be an integer from 1 through 5")
         if priority <= 2:
-            critical.append(agent_id)
+            critical[priority].append(agent_id)
         else:
             flexible.append((urgency, priority, agent_id))
 
     _require_valid_kw(sum(demands.values()), "total_demand")
     result = {agent_id: 0.0 for agent_id in sorted(demands)}
-    groups = [sorted(critical)]
+    groups = [sorted(critical[1]), sorted(critical[2])]
     flexible.sort(key=lambda item: (-item[0], item[1], item[2]))
     index = 0
     while index < len(flexible):
@@ -57,10 +57,14 @@ def hybrid_allocate(available_power_kw, bids, priorities) -> dict[str, float]:
             groups.append([item[2] for item in members])
         index = end
 
-    for group in groups:
+    for group_index, group in enumerate(groups):
         if not group or remaining <= 0.0:
             continue
         allocated = allocate(remaining, {agent_id: demands[agent_id] for agent_id in group})
         result.update({agent_id: float(value) for agent_id, value in allocated.items()})
+        if group_index < 2 and sum(demands[agent_id] for agent_id in group) > remaining:
+            # A short critical group consumes the budget. Do not leak a
+            # floating-point subtraction remainder into a lower priority.
+            break
         remaining = max(0.0, remaining - sum(allocated.values()))
     return result
