@@ -150,6 +150,29 @@ def test_partial_flexible_singleton_after_critical_group():
     assert facts["agents"][1]["reason"] == "critical_first"
 
 
+@pytest.mark.parametrize("available", [.5, 1, 1.5])
+def test_priority_two_singleton_reports_priority_one_precedence(available):
+    facts = facts_for([bid("p1"), bid("p2")], available, {"p1": 1, "p2": 2})
+    p1, p2 = facts["agents"]
+    assert p1["allocated_kw"] == min(available, 1)
+    assert p2["allocated_kw"] == max(0, available - 1)
+    assert p2["reason"] == "critical_first"
+
+
+def test_priority_two_peers_share_only_within_their_own_group():
+    facts = facts_for([bid("p1"), bid("p2a"), bid("p2b", 3)], 3,
+                      {"p1": 1, "p2a": 2, "p2b": 2})
+    p1, p2a, p2b = facts["agents"]
+    assert p1["allocated_kw"] == 1
+    assert [p2a["allocated_kw"], p2b["allocated_kw"]] == [.5, 1.5]
+    assert p2a["reason"] == p2b["reason"] == "shared_proportionally"
+
+
+def test_priority_two_without_priority_one_does_not_invent_precedence():
+    facts = facts_for([bid("p2")], .5, {"p2": 2})
+    assert facts["agents"][0]["reason"] == "shared_proportionally"
+
+
 def test_pure_deterministic_order_and_template():
     bids = [bid("b", 2), bid("a", 4)]
     priorities, allocation = {"a": 3}, {"a": 3., "b": 0.}

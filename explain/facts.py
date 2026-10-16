@@ -91,8 +91,16 @@ def build_step_facts(timestamp, available_kw, bids, priorities, allocation,
         elif served == demand:
             reason = ("critical_first" if strategy == "hybrid" and priority <= 2
                       and shortage else "fully_served")
-        elif strategy == "baseline" or priority <= 2 or available == 0:
+        elif strategy == "baseline" or available == 0:
             reason = "shared_proportionally"
+        elif priority <= 2:
+            earlier_critical = any(
+                priorities.get(other, 5) < priority and value > 0
+                for other, value in actual.items())
+            peers = sum(value > 0 and priorities.get(other, 5) == priority
+                        for other, value in demands.items())
+            reason = ("critical_first" if earlier_critical and (served == 0 or peers == 1)
+                      else "shared_proportionally")
         elif served > 0:
             peers = sum(demands[other] > 0 for other in groups
                         if groups[other] == groups[key])

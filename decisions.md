@@ -258,8 +258,8 @@ bids, so invalid input fails loudly at the source.
 
 ## Phase 2 — Hybrid arbiter
 Decision: `hybrid_allocate(available_power_kw, bids, priorities)` serves
-priorities 1-2 together first, sharing proportionally to demand when solar
-is insufficient. Missing priorities default to 5. Flexible bids are sorted
+priority 1 fully before priority 2, sharing proportionally to demand within
+each priority when solar is insufficient. Missing priorities default to 5. Flexible bids are sorted
 by descending urgency, then lower priority number, then agent ID.
 Urgencies within 1e-9 of the highest urgency in a band are treated as tied;
 the fixed highest-value anchor prevents transitive chains of near-ties.
@@ -286,6 +286,71 @@ discharge on a load deficit, or idle when no feasible demand/supply remains.
 Charge and discharge are mutually exclusive. The selector returns feasible
 power bids; it does not apply power, run a closed-loop simulation, or mutate
 twin state. Both baseline and hybrid callers can use the same policy.
+
+## Phase 2 — Twin observe/commit step (issue #54)
+Decision: `DigitalTwin.observe()` advances the EV and appliance exogenous
+schedules once and records the interval without applying battery, EV charging,
+or appliance runtime progress. `commit(delivered)` then applies either the
+autonomous behavior (`delivered=None`) or caller-provided power and advances
+the twin clock exactly once. Calling either method out of order is an error.
+
+`DigitalTwinConfig(closed_loop=False)` preserves the legacy tick path and its
+captured 288-row outputs. Closed-loop mode uses stable per-appliance RNG
+streams and a fixed pair of schedule draws per appliance per interval, so
+allocation changes cannot shift later random draws. A successful start draw
+while an earlier cycle is still running is recorded as a blocked start.
+
+Delivered battery power is signed and passes through the single battery model
+update for the interval. EV delivery is non-negative, capped by the configured
+charger rate and SOC headroom, and is rejected while unplugged. Flexible
+appliance runtime decreases in proportion to served/desired power; essential
+loads never complete. Closed-loop rows expose desired and served appliance
+power plus the battery power actually applied. The runner and outcome metrics
+remain separate follow-up work.
+
+## Phase 2 — Closed-loop runner (issue #56)
+Decision: `simulation.closed_loop.run_closed_loop()` is the shared execution
+loop for proportional and hybrid allocator comparisons. It observes a fresh
+closed-loop twin, updates the existing agents, derives battery charge/supply
+feasibility from the twin configuration, selects charge/discharge/idle mode,
+allocates power, and commits the signed battery plus load deliveries exactly
+once. `proportional_adapter()` adapts the unchanged baseline allocator to the
+same bid/priorities interface used by `hybrid_allocate()`.
+
+Appliance bids use the twin observation's `appliance_desired_kw` values when
+present; `ApplianceAgent` retains its rated-power behavior for legacy rows
+without that optional key. Priority maps come from the twin roster, with the
+EV charger priority applied to `ev_1` and the battery assigned priority 5.
+
+Every record includes the allocator inputs and outputs, selected mode,
+available and curtailed power, signed battery power, desired/served appliance
+power, and post-commit SOC state. The runner rejects stale or non-closed-loop
+twins and checks allocation caps, charge/discharge exclusivity, power balance,
+and zero curtailment in discharge mode. Metrics and paired outcome scoring
+remain separate follow-up work.
+
+The fixed household base load participates as `household_base_load`, an
+always-on priority-1 bid, so it is included in allocation and battery balance.
+Physical limits and energy checks use unrounded SOC and solar power. EV
+service is recorded separately as `ev_applied_kw`, capped by physical charging
+headroom, and excluded from appliance totals to avoid counting it twice.
+Post-commit balance and SOC checks verify actual delivery, not just requests.
+
+## Issue #64 — Sensor-only fault injection and labelled export
+Decision: implement faults as a deterministic observation wrapper around clean
+twin or generator rows. The wrapper supports dropout, NaN, stuck, spike, and
+drift faults, with fixed half-open step windows or seeded probability/duration
+events. `generate_fault_dataset()` exports clean, observed, and per-key fault
+columns without changing the source rows or simulation physics.
+Why: Phase 6 needs repeatable labelled bad observations, while agents must keep
+their existing fail-fast validation behavior. Fault response policy and faults
+that alter device physics remain out of scope for this layer.
+
+Fault configurations canonicalize aliases and validate integer boundaries,
+durations and finite numeric parameters before use. Probability events extend
+as chronological observations arrive, without a fixed horizon; expired events
+are discarded. The first configured active fault wins on overlap. A stuck
+sensor without a prior good sample freezes its first available reading.
 
 ## Phase 4 — Facts-first allocation explanations
 Decision: ship a deterministic, offline facts builder and template first.
@@ -314,3 +379,8 @@ the fixed deferred_lower_urgency code includes priority tie-breaks, so
 its text says earlier urgency/priority groups rather than asserting a
 strict urgency difference. The demo uses the current generator/arbiter
 contracts and makes no claims about closed-loop outcomes or superiority.
+
+Critical reasons follow the separate priority-1 and priority-2 pools: a
+priority-2 singleton limited by earlier priority-1 service reports
+critical_first. Actual priority-2 peers still report proportional sharing
+within their own pool; no sharing across critical priorities is implied.
