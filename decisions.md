@@ -352,24 +352,35 @@ as chronological observations arrive, without a fixed horizon; expired events
 are discarded. The first configured active fault wins on overlap. A stuck
 sensor without a prior good sample freezes its first available reading.
 
-## EV user preferences (issue #62)
-EVAgent accepts target_soc_pct (default 100%) and ready_by_min (default
-None, using reported departure). Targets must be finite in (0, 100];
-ready-by must be None or finite in [0, 1440). Invalid preferences raise
-ValueError at construction or row update, even when the EV is unplugged.
-Optional ev_target_soc_pct and ev_ready_by_min row keys override constructor
-preferences for that step only; absent keys restore constructor defaults.
-An explicit row ready-by of None selects the reported departure.
-Demand retains max_charge_kw times the positive SOC gap divided by 100;
-urgency uses that same target gap and the existing overnight-wrapped time
-pressure, returning zero at or above target. Existing sensor validation
-still applies, including non-finite reported departure values.
-_build_agents and run_simulation pass both preferences through. Defaults
-preserve existing bids; twin EV models and charging segments are unchanged.
+## Phase 4 — Facts-first allocation explanations
+Decision: ship a deterministic, offline facts builder and template first.
+External disclosure of simulated step data has not been approved; the
+render_llm entry point always warns and returns the template, without
+invoking even an injected client. No LLM SDK or credentials are required.
+Enabling an external renderer needs a separate owner privacy decision,
+facts-only JSON input, fake-client tests and numeric-claim validation at
+six decimal places; that integration and its number checker are deferred.
 
-At the DataFrame input boundary, missing preference cells (NaN/pd.NA) mean
-no override and restore constructor defaults. Sensor NaNs and infinities
-remain invalid, as do NaN preferences supplied directly to EVAgent or in
-list-of-dict inputs. For an explicit per-row ready-by reset, use an object
-column containing None; pd.NA means absent. Numeric columns collapse None
-to NaN and cannot preserve that distinction. Source DataFrames are unchanged.
+The builder accepts an explicit keyword-only strategy (hybrid by default,
+or baseline) and verifies allocations against that policy before attaching
+reasons. Missing allocation keys mean zero. Facts retain full numeric
+precision; template kW values display six decimal places. Agent output is
+sorted by ID, and no inputs are mutated. Zero demand has served_fraction
+1.0. Missed-window events are the agent's existing reported events, not
+proof of an incomplete physical appliance cycle. They override the reason.
+Baseline shortages use shared_proportionally; baseline priority metadata
+and finite urgency values do not undergo hybrid range/type checks.
+Partially served flexible singletons reflect earlier-group precedence;
+proportional sharing applies to actual peer groups (or a lone group with
+no earlier service). Urgency bands use the arbiter's fixed-anchor tolerance.
+Hybrid reasons describe
+critical precedence, proportional groups and deferred flexible groups;
+the fixed deferred_lower_urgency code includes priority tie-breaks, so
+its text says earlier urgency/priority groups rather than asserting a
+strict urgency difference. The demo uses the current generator/arbiter
+contracts and makes no claims about closed-loop outcomes or superiority.
+
+Critical reasons follow the separate priority-1 and priority-2 pools: a
+priority-2 singleton limited by earlier priority-1 service reports
+critical_first. Actual priority-2 peers still report proportional sharing
+within their own pool; no sharing across critical priorities is implied.
