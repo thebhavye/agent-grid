@@ -237,10 +237,28 @@ class EVModel:
 
     def _advance_schedule(self, time_delta_min: float) -> None:
         """Advance the exogenous clock and resolve plug-in transitions."""
+        previous_minute = self._current_minute % 1440
+        previous_segment = self._active_segment_idx
         self._current_minute = (self._current_minute + time_delta_min) % 1440
         prev_plugged = self._plugged_in
         self._update_plugged_state(self._current_minute)
-        if self._plugged_in and not prev_plugged:
+        crossed_gap = False
+        if self.config.segments is not None and prev_plugged and self._plugged_in:
+            # Endpoint plug states can hide an entire unplugged gap. Adjacent
+            # segments, including a continuous midnight connection, have none.
+            count = len(self._segments)
+            transitions = (self._active_segment_idx - previous_segment) % count
+            if (self._find_active_segment(previous_minute) == previous_segment
+                    and (time_delta_min >= 1440 or (
+                        not transitions and self._current_minute < previous_minute))):
+                transitions = count
+            for offset in range(transitions):
+                before = self._segments[(previous_segment + offset) % count]
+                after = self._segments[(previous_segment + offset + 1) % count]
+                if before.end_min % 1440 != after.start_min:
+                    crossed_gap = True
+                    break
+        if self._plugged_in and (not prev_plugged or crossed_gap):
             # The EV was away between segments.  Its driving is represented
             # by the next segment's start SOC, not by autonomous charging.
             self._soc_pct = self._segments[self._active_segment_idx].start_soc

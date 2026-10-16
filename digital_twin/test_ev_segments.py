@@ -164,3 +164,54 @@ def test_custom_delivery_caps_at_full_soc():
 
 def test_builtin_scenario_enum_is_unchanged():
     assert [scenario.value for scenario in EVScenario] == ["overnight", "midday", "evening_topup"]
+
+
+@pytest.mark.parametrize("duration,expected_soc", [(20, 15), (1435, 90), (1440, 90), (1460, 15)])
+def test_long_step_resets_soc_after_crossing_an_unplugged_gap(duration, expected_soc):
+    model = EVModel(EVModelConfig(segments=[
+        EVSegment(0, 10, 90, 95), EVSegment(20, 30, 15, 80),
+    ]))
+    model.initialize_at(datetime(2024, 1, 15, 0, 5))
+    assert model.observe(duration)["soc_pct"] == expected_soc
+
+
+def test_long_step_resets_after_gap_across_midnight():
+    model = EVModel(EVModelConfig(segments=[
+        EVSegment(10, 30, 15, 80), EVSegment(1430, 1440, 90, 95),
+    ]))
+    model.initialize_at(datetime(2024, 1, 15, 23, 55))
+    assert model.observe(20)["soc_pct"] == 15
+
+
+def test_adjacent_custom_segments_do_not_reset_a_continuous_connection():
+    model = EVModel(EVModelConfig(segments=[
+        EVSegment(0, 10, 90, 95), EVSegment(10, 30, 15, 80),
+    ]))
+    model.initialize_at(datetime(2024, 1, 15, 0, 5))
+    initial = model.soc_pct
+    assert model.observe(20)["soc_pct"] == initial
+
+
+def test_initial_twin_observation_preserves_initialized_soc_inside_segment():
+    twin = make_test_twin(
+        start=datetime(2024, 1, 15, 6, 2), closed_loop=True,
+        ev_config=EVModelConfig(segments=[
+            EVSegment(0, 360, 90, 95), EVSegment(361, 420, 15, 80),
+        ]),
+    )
+    expected = 15 + (1 / (59 * 0.8)) * (80 - 15)
+    assert twin.observe()["ev_soc_pct"] == round(expected, 2)
+    twin.commit({"ev_1": 0})
+
+
+def test_mixed_twin_timesteps_reset_after_an_unplugged_gap():
+    twin = make_test_twin(
+        start=datetime(2024, 1, 15, 0, 5), closed_loop=True,
+        ev_config=EVModelConfig(segments=[
+            EVSegment(0, 10, 90, 95), EVSegment(20, 30, 15, 80),
+        ]),
+    )
+    twin.observe(20)
+    twin.commit({"ev_1": 0})
+    assert twin.observe(5)["ev_soc_pct"] == 15
+    twin.commit({"ev_1": 0})
