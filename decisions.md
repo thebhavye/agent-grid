@@ -286,3 +286,26 @@ discharge on a load deficit, or idle when no feasible demand/supply remains.
 Charge and discharge are mutually exclusive. The selector returns feasible
 power bids; it does not apply power, run a closed-loop simulation, or mutate
 twin state. Both baseline and hybrid callers can use the same policy.
+
+## Phase 4 — Facts-first allocation explanations
+Decision: ship a deterministic, offline facts builder and template first.
+External disclosure of simulated step data has not been approved; the
+render_llm entry point always warns and returns the template, without
+invoking even an injected client. No LLM SDK or credentials are required.
+Enabling an external renderer needs a separate owner privacy decision,
+facts-only JSON input, fake-client tests and numeric-claim validation at
+six decimal places; that integration and its number checker are deferred.
+
+The builder accepts an explicit keyword-only strategy (hybrid by default,
+or baseline) and verifies allocations against that policy before attaching
+reasons. Missing allocation keys mean zero. Facts retain full numeric
+precision; template kW values display six decimal places. Agent output is
+sorted by ID, and no inputs are mutated. Zero demand has served_fraction
+1.0. Missed-window events are the agent's existing reported events, not
+proof of an incomplete physical appliance cycle. They override the reason.
+Baseline shortages use shared_proportionally. Hybrid reasons describe
+critical precedence, proportional groups and deferred flexible groups;
+the fixed deferred_lower_urgency code includes priority tie-breaks, so
+its text says earlier urgency/priority groups rather than asserting a
+strict urgency difference. The demo uses the current generator/arbiter
+contracts and makes no claims about closed-loop outcomes or superiority.
