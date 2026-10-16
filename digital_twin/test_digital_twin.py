@@ -10,9 +10,11 @@ Run everything (requires internet) with:
     pytest digital_twin/ -v
 """
 
+import json
 import logging
 import math
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from urllib.parse import parse_qs, urlparse
 
@@ -821,6 +823,242 @@ class TestApplianceModel:
 # ---------------------------------------------------------------------------
 
 class TestDigitalTwin:
+    @pytest.mark.parametrize("start", [
+        datetime(2024, 1, 15, 7, 5),
+        datetime(2024, 1, 15, 23, 59, 30, tzinfo=timezone.utc),
+    ])
+    def test_closed_loop_mixed_steps_sample_interval_start(self, start):
+        twin = self._closed_twin(seed=7)
+        for _ in range(2):
+            twin.reset(start)
+            for dt in (15, 2.5, 5, 0.25):
+                before = twin.current_time
+                minute = (before.hour * 60 + before.minute
+                          + before.second / 60 + before.microsecond / 60_000_000)
+                obs = twin.observe(dt)
+                assert twin._ev.current_minute == pytest.approx(minute)
+                assert twin._appliances.current_minute == pytest.approx(minute)
+                assert twin.current_time == before
+                if before.hour == 7 and before.minute == 5:
+                    assert obs["ev_plugged_in"] is True
+                row = twin.commit({})
+                assert row["timestamp"] == before.strftime("%H:%M")
+                assert twin.current_time == before + timedelta(minutes=dt)
+
+    @staticmethod
+    def _closed_twin(seed=7, scenario=EVScenario.OVERNIGHT, **overrides):
+        client, _ = _mock_client()
+        kwargs = dict(
+            start_datetime=datetime(2024, 1, 15),
+            weather_client=client,
+            ev_config=EVModelConfig(scenario=scenario, seed=seed),
+            appliance_config=ApplianceModelConfig(seed=seed),
+            closed_loop=True,
+        )
+        kwargs.update(overrides)
+        return DigitalTwin(DigitalTwinConfig(**kwargs))
+
+    @pytest.mark.parametrize("fixture_key", [
+        "seed_1_overnight", "seed_1_midday", "seed_1_evening_topup",
+        "seed_7_overnight", "seed_7_midday", "seed_7_evening_topup",
+        "seed_42_overnight", "seed_42_midday", "seed_42_evening_topup",
+        "default",
+    ])
+    def test_legacy_tick_matches_pre_refactor_fixture(self, fixture_key):
+        """Issue #54: the legacy path remains exactly reproducible."""
+        fixture_path = Path(__file__).parent / "fixtures" / "current_twin_outputs.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        if fixture_key == "default":
+            client, _ = _mock_client()
+            twin = DigitalTwin(DigitalTwinConfig(
+                start_datetime=datetime(2024, 1, 15),
+                weather_client=client,
+            ))
+        else:
+            _, seed_text, scenario_text = fixture_key.split("_", 2)
+            twin = make_test_twin(
+                seed=int(seed_text),
+                ev_config=EVModelConfig(
+                    scenario=EVScenario(scenario_text), seed=int(seed_text)
+                ),
+                appliance_config=ApplianceModelConfig(seed=int(seed_text)),
+            )
+        assert twin.run_full_day() == fixture["runs"][fixture_key]
+
+    def test_observe_commit_ordering_and_zero_delivery(self):
+        twin = self._closed_twin()
+        with pytest.raises(RuntimeError, match=r"observe\(\) first"):
+            twin.commit()
+
+        observation = twin.observe()
+        battery_before = twin._battery.soc_pct
+        ev_before = twin._ev.soc_pct
+        with pytest.raises(RuntimeError, match=r"commit\(\)"):
+            twin.observe()
+
+        row = twin.commit({"battery_1": 0.0, "ev_1": 0.0})
+        assert twin._battery.soc_pct == battery_before
+        assert twin._ev.soc_pct == pytest.approx(ev_before)
+        assert row["battery_applied_kw"] == 0.0
+        assert set(row["appliance_desired_kw"]) == set(row["appliance_served_kw"])
+        assert all(value == 0.0 for value in row["appliance_served_kw"].values())
+        assert twin.current_time == datetime(2024, 1, 15, 0, 5)
+        assert observation["timestamp"] == row["timestamp"] == "00:00"
+
+    @pytest.mark.parametrize("delivered", [
+        {"unknown": 1.0},
+        {"battery_1": float("nan")},
+        {"ev_1": float("inf")},
+        {"appliance_fridge": -0.1},
+    ])
+    def test_closed_loop_rejects_invalid_deliveries(self, delivered):
+        twin = self._closed_twin()
+        twin.observe()
+        with pytest.raises(ValueError):
+            twin.commit(delivered)
+
+    def test_closed_loop_battery_delivery_is_applied_once(self):
+        twin = self._closed_twin()
+        initial = twin._battery.soc_pct
+        twin.observe()
+        row = twin.commit({"battery_1": 3.0})
+        expected_soc = initial + (3.0 * 5 / 60 * twin._battery.config.charge_efficiency
+                                  / twin._battery.capacity_kwh * 100)
+        assert row["battery_applied_kw"] == pytest.approx(3.0)
+        assert twin._battery.soc_pct == pytest.approx(expected_soc)
+
+    @pytest.mark.parametrize("soc,power", [(100, 3), (0, -3), (99.9, 6), (0.1, -12)])
+    def test_closed_loop_battery_reports_transferred_power(self, soc, power):
+        twin = self._closed_twin(battery_config=BatteryModelConfig(initial_soc_pct=soc))
+        twin.observe()
+        row = twin.commit({"battery_1": power})
+        cfg = twin._battery.config
+        delta = (twin._battery.soc_pct - soc) / 100 * cfg.capacity_kwh
+        expected = delta / cfg.charge_efficiency if delta >= 0 else delta * cfg.discharge_efficiency
+        assert row["battery_applied_kw"] == pytest.approx(expected * 12)
+        assert abs(row["battery_applied_kw"]) < abs(power)
+
+    @pytest.mark.parametrize("rate,soc,requested", [(7, 50, 7), (2, 50, 7), (7, 99.9, 7), (7, 100, 7)])
+    def test_closed_loop_ev_has_one_energy_record(self, rate, soc, requested):
+        twin = self._closed_twin(ev_config=EVModelConfig(scenario=EVScenario.OVERNIGHT,
+                                                       max_charge_kw=rate))
+        observation = twin.observe()
+        twin._ev._soc_pct = soc
+        row = twin.commit({"ev_1": requested})
+        cfg = twin._ev.config
+        expected = (twin._ev.soc_pct - soc) / 100 * cfg.battery_capacity_kwh / cfg.charge_efficiency * 12
+        assert row["ev_applied_kw"] == pytest.approx(expected)
+        assert row["ev_applied_kw"] <= rate + 1e-10
+        assert "ev_charger" not in observation["appliance_desired_kw"]
+        assert "ev_charger" not in row["appliance_served_kw"]
+
+    def test_rejected_commit_keeps_interval_retryable(self):
+        twin = self._closed_twin(scenario=EVScenario.MIDDAY)
+        twin.observe()
+        before = (twin.current_time, twin._battery.soc_pct, twin._ev.soc_pct,
+                  twin._appliances.get_appliance_state("fridge").copy())
+        for delivery in ({"appliance_ev_charger": 2}, {"ev_1": 2}, {"battery_1": float("nan")}):
+            with pytest.raises(ValueError):
+                twin.commit(delivery)
+            assert before == (twin.current_time, twin._battery.soc_pct, twin._ev.soc_pct,
+                              twin._appliances.get_appliance_state("fridge"))
+            assert twin.step_count == 0
+        twin.commit({})
+        assert twin.step_count == 1
+
+    @pytest.mark.parametrize("dt", [0, -1, float("nan"), float("inf"), -float("inf")])
+    def test_closed_loop_bad_timestep_does_not_advance_schedule(self, dt):
+        twin = self._closed_twin()
+        before = (twin._ev.current_minute, twin._appliances.rng_draw_count)
+        with pytest.raises(ValueError):
+            twin.observe(dt)
+        assert before == (twin._ev.current_minute, twin._appliances.rng_draw_count)
+        twin.observe()
+        twin.commit({})
+
+    def test_closed_loop_reset_replays_deliveries(self):
+        twin = self._closed_twin()
+        def run():
+            rows = []
+            for _ in range(288):
+                obs = twin.observe()
+                rows.append(twin.commit({"ev_1": 2 if obs["ev_plugged_in"] else 0}))
+            return rows
+        first = run()
+        twin.reset()
+        assert run() == first
+
+    def test_closed_loop_ev_delivery_and_unplugged_guard(self):
+        twin = self._closed_twin(seed=42)
+        initial = twin._ev.soc_pct
+        twin.observe()
+        twin.commit({"ev_1": 2.0})
+        expected_soc = initial + (2.0 * 5 / 60 * twin._ev.config.charge_efficiency
+                                  / twin._ev.config.battery_capacity_kwh * 100)
+        assert twin._ev.soc_pct == pytest.approx(expected_soc)
+
+        unplugged = self._closed_twin(seed=42, scenario=EVScenario.MIDDAY)
+        assert unplugged.observe()["ev_plugged_in"] is False
+        with pytest.raises(ValueError, match="unplugged"):
+            unplugged.commit({"ev_1": 1.0})
+
+    def test_closed_loop_tick_none_is_deterministic_and_valid(self):
+        first = self._closed_twin(seed=42)
+        second = self._closed_twin(seed=42)
+        rows_a = first.run_full_day()
+        rows_b = second.run_full_day()
+        assert rows_a == rows_b
+        assert len(rows_a) == 288
+        for row in rows_a:
+            assert 0 <= row["battery_soc_pct"] <= 100
+            assert 0 <= row["ev_soc_pct"] <= 100
+            assert row["appliance_desired_kw"].keys() == row["appliance_served_kw"].keys()
+
+    def test_closed_loop_schedule_draws_are_allocation_independent(self):
+        served = self._closed_twin(seed=7)
+        starved = self._closed_twin(seed=7)
+        for _ in range(288):
+            served_observation = served.observe()
+            starved.observe()
+            delivered = {
+                "battery_1": 0.0,
+                "ev_1": 7.0 if served_observation["ev_plugged_in"] else 0.0,
+            }
+            delivered.update({
+                f"appliance_{key}": value
+                for key, value in served_observation["appliance_desired_kw"].items()
+            })
+            served.commit(delivered)
+            starved.commit({"battery_1": 0.0, "ev_1": 0.0})
+
+        assert served._appliances.drawn_cycle_start_times == (
+            starved._appliances.drawn_cycle_start_times
+        )
+        assert served._appliances.rng_draw_count == starved._appliances.rng_draw_count
+        assert any(starved._appliances.blocked_starts.values())
+
+    def test_closed_loop_appliance_service_controls_completion(self):
+        spec = ApplianceSpec(
+            "dishwasher", 4, True, 1.2, 0, 10,
+            min_runtime_min=5, max_runtime_min=5, cycle_prob_per_hour=12,
+        )
+        full = ApplianceModel(
+            ApplianceModelConfig(seed=42, appliances=[spec]), closed_loop=True
+        )
+        half = ApplianceModel(
+            ApplianceModelConfig(seed=42, appliances=[spec]), closed_loop=True
+        )
+        full.initialize_at(datetime(2024, 1, 15))
+        half.initialize_at(datetime(2024, 1, 15))
+        full.observe(5)
+        half.observe(5)
+        full.commit(5, {"appliance_dishwasher": 1.2})
+        half.commit(5, {"appliance_dishwasher": 0.6})
+        assert not full.get_appliance_state("dishwasher")["is_on"]
+        assert half.get_appliance_state("dishwasher")["is_on"]
+        half.observe(5)
+        half.commit(5, {"appliance_dishwasher": 0.6})
+        assert not half.get_appliance_state("dishwasher")["is_on"]
     @pytest.mark.parametrize("durations", [(5, 15), (1, 7.5, 15, 2.5), (60, 1440, 5)])
     def test_simulated_minutes_tracks_mixed_ticks(self, durations):
         twin = make_test_twin()

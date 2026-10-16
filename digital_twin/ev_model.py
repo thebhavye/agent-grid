@@ -190,6 +190,95 @@ class EVModel:
         self._update_plugged_state(self._current_minute)
         self._soc_pct = self._calculate_soc_at_minute(self._current_minute)
 
+    def _advance_schedule(self, time_delta_min: float) -> None:
+        """Advance the exogenous clock and resolve plug-in transitions."""
+        self._current_minute = (self._current_minute + time_delta_min) % 1440
+        prev_plugged = self._plugged_in
+        self._update_plugged_state(self._current_minute)
+        if self._plugged_in and not prev_plugged:
+            # The EV was away between segments.  Its driving is represented
+            # by the next segment's start SOC, not by autonomous charging.
+            self._soc_pct = self._segments[self._active_segment_idx].start_soc
+
+    def _apply_autonomous_charge(self, time_delta_min: float) -> dict:
+        """Apply the legacy ramp/noise behavior after the schedule advances."""
+        charging_kw = 0.0
+
+        if self._plugged_in and self._active_segment_idx >= 0:
+            seg = self._segments[self._active_segment_idx]
+            seg_duration = seg.end_min - seg.start_min
+            charge_duration = max(seg_duration * 0.8, 1.0)
+            elapsed = self._current_minute - seg.start_min
+
+            if elapsed < charge_duration:
+                progress = elapsed / charge_duration
+                target_soc = seg.start_soc + (seg.target_soc - seg.start_soc) * progress
+                soc_delta = target_soc - self._soc_pct
+                energy_needed_kwh = (soc_delta / 100.0) * self.config.battery_capacity_kwh
+                time_delta_h = time_delta_min / 60.0
+                required_power_kw = energy_needed_kwh / time_delta_h / self.config.charge_efficiency
+                charging_kw = max(0.0, min(self.config.max_charge_kw, required_power_kw))
+                energy_stored_kwh = charging_kw * time_delta_h * self.config.charge_efficiency
+                self._soc_pct += (energy_stored_kwh / self.config.battery_capacity_kwh) * 100.0
+            else:
+                self._soc_pct = seg.target_soc
+
+        self._soc_pct = max(0.0, min(100.0, self._soc_pct))
+        if self._plugged_in and charging_kw > 0:
+            noise = self._rng.normalvariate(0, 0.3)
+            self._soc_pct = max(0.0, min(100.0, self._soc_pct + noise))
+
+        return {
+            "soc_pct": self._soc_pct,
+            "departure_min": self._departure_min,
+            "plugged_in": self._plugged_in,
+            "charging_kw": charging_kw,
+        }
+
+    def observe(self, time_delta_min: float = 5.0) -> dict:
+        """Advance the EV schedule without applying charging power."""
+        self._advance_schedule(time_delta_min)
+        return {
+            "soc_pct": self._soc_pct,
+            "departure_min": self._departure_min,
+            "plugged_in": self._plugged_in,
+            "charging_kw": 0.0,
+        }
+
+    def commit_delivered(self, time_delta_min: float, delivered_kw: float) -> dict:
+        """Apply caller-delivered EV charging power for the observed interval."""
+        if delivered_kw < 0:
+            raise ValueError("EV delivered power must be non-negative")
+        if delivered_kw > 0 and not self._plugged_in:
+            raise ValueError("cannot deliver positive EV power while unplugged")
+
+        requested_kw = min(self.config.max_charge_kw, delivered_kw)
+        time_delta_h = time_delta_min / 60.0
+        if not self._plugged_in:
+            requested_kw = 0.0
+
+        headroom_kwh = (100.0 - self._soc_pct) / 100.0 * self.config.battery_capacity_kwh
+        stored_energy_kwh = min(
+            headroom_kwh,
+            requested_kw * time_delta_h * self.config.charge_efficiency,
+        )
+        self._soc_pct += (stored_energy_kwh / self.config.battery_capacity_kwh) * 100.0
+        actual_kw = (
+            stored_energy_kwh / time_delta_h / self.config.charge_efficiency
+            if time_delta_h > 0 and self.config.charge_efficiency > 0
+            else 0.0
+        )
+        return {
+            "soc_pct": max(0.0, min(100.0, self._soc_pct)),
+            "departure_min": self._departure_min,
+            "plugged_in": self._plugged_in,
+            "charging_kw": actual_kw,
+        }
+
+    def commit_autonomous(self, time_delta_min: float) -> dict:
+        """Apply the legacy autonomous charging ramp after ``observe()``."""
+        return self._apply_autonomous_charge(time_delta_min)
+
     def tick(self, time_delta_min: float = 5.0) -> dict:
         """Advance simulation by one timestep.
 
@@ -203,63 +292,8 @@ class EVModel:
                 - "plugged_in": Whether EV is plugged in (bool)
                 - "charging_kw": Current charging power (kW), 0 if not charging
         """
-        # Update time
-        self._current_minute = (self._current_minute + time_delta_min) % 1440
-
-        # Check for segment transitions.  A disconnected EV has been driving
-        # between the two overnight segments, so its SOC must be reset to the
-        # new segment's start value when it returns home.  Without this, the
-        # morning target SOC carries into the evening segment and the computed
-        # charging delta is negative, suppressing all evening charging.
-        prev_plugged = self._plugged_in
-        self._update_plugged_state(self._current_minute)
-
-        charging_kw = 0.0
-
-        if self._plugged_in and self._active_segment_idx >= 0:
-            seg = self._segments[self._active_segment_idx]
-            if not prev_plugged:
-                self._soc_pct = seg.start_soc
-            seg_duration = seg.end_min - seg.start_min
-            charge_duration = max(seg_duration * 0.8, 1.0)
-            elapsed = self._current_minute - seg.start_min
-
-            if elapsed < charge_duration:
-                # Charging phase: linear ramp to target
-                progress = elapsed / charge_duration
-                target_soc = seg.start_soc + (seg.target_soc - seg.start_soc) * progress
-
-                # Calculate required charge power to reach target
-                # (simplified: we just move SOC toward target)
-                soc_delta = target_soc - self._soc_pct
-                energy_needed_kwh = (soc_delta / 100.0) * self.config.battery_capacity_kwh
-                time_delta_h = time_delta_min / 60.0
-                required_power_kw = energy_needed_kwh / time_delta_h / self.config.charge_efficiency
-
-                # Clamp to max charge rate
-                charging_kw = max(0.0, min(self.config.max_charge_kw, required_power_kw))
-
-                # Apply charging
-                energy_stored_kwh = charging_kw * time_delta_h * self.config.charge_efficiency
-                self._soc_pct += (energy_stored_kwh / self.config.battery_capacity_kwh) * 100.0
-            else:
-                # Past charging phase, hold at target (or slightly above due to noise)
-                self._soc_pct = seg.target_soc
-
-        # Clamp SOC
-        self._soc_pct = max(0.0, min(100.0, self._soc_pct))
-
-        # Add small measurement noise while charging (matching generator)
-        if self._plugged_in and charging_kw > 0:
-            noise = self._rng.normalvariate(0, 0.3)
-            self._soc_pct = max(0.0, min(100.0, self._soc_pct + noise))
-
-        return {
-            "soc_pct": self._soc_pct,
-            "departure_min": self._departure_min,
-            "plugged_in": self._plugged_in,
-            "charging_kw": charging_kw,
-        }
+        self._advance_schedule(time_delta_min)
+        return self._apply_autonomous_charge(time_delta_min)
 
     @property
     def soc_pct(self) -> float:
