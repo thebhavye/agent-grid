@@ -1,5 +1,6 @@
 """Regression and invariant tests for the closed-loop runner."""
 
+import json
 import math
 
 import pytest
@@ -7,7 +8,12 @@ import pytest
 from digital_twin.appliance_model import ApplianceModelConfig
 from digital_twin.battery_model import BatteryModelConfig
 from digital_twin.ev_model import EVModelConfig, EVScenario
-from digital_twin.faults import DeviceFaultConfig, FaultConfig
+from digital_twin.faults import (
+    DeviceFaultConfig,
+    DeviceFaultInjector,
+    FaultConfig,
+    FaultInjector,
+)
 from digital_twin.test_digital_twin import make_test_twin
 from simulation.baseline_allocator import allocate
 from simulation.closed_loop import proportional_adapter, run_closed_loop
@@ -482,3 +488,88 @@ def test_device_faults_are_deterministic():
         )
 
     assert run() == run()
+
+
+def test_held_dropout_substitution_logs_are_serializable():
+    config = FaultConfig(enabled=True, faults=[
+        {"type": "dropout", "key": "battery_soc_pct", "start_step": 10, "end_step": 14},
+    ])
+    records = run_closed_loop(
+        make_test_twin(closed_loop=True), hybrid_allocate,
+        on_bad_reading="hold_last", sensor_faults=config,
+    )
+    entries = [
+        entry for record in records for entry in record["substitutions"]
+        if entry["key"] == "battery_soc_pct"
+    ]
+    assert any(entry["policy"] == "hold_last" for entry in entries)
+    # A held dropout has no observed value; the private sentinel must not
+    # reach the exported record. json.dumps fails on the raw object.
+    assert all(entry["observed"] is None for entry in entries)
+    json.dumps(records)
+
+
+def _stuck_one_step_run(start_soc, sensor_faults):
+    twin = make_test_twin(
+        closed_loop=True,
+        battery_config=BatteryModelConfig(initial_soc_pct=start_soc),
+    )
+    return run_closed_loop(
+        twin, hybrid_allocate, steps=1,
+        on_bad_reading="hold_last", sensor_faults=sensor_faults,
+    )
+
+
+def test_reused_sensor_injector_starts_each_run_from_its_config():
+    spec = {"type": "stuck", "key": "battery_soc_pct", "start_step": 0, "end_step": 1}
+    reused = FaultInjector(FaultConfig(enabled=True, faults=[spec]))
+    fresh_first = _stuck_one_step_run(50.0, FaultConfig(enabled=True, faults=[spec]))
+    fresh_second = _stuck_one_step_run(80.0, FaultConfig(enabled=True, faults=[spec]))
+    # The two scenarios must differ, or the equality checks are vacuous.
+    assert (
+        fresh_first[0]["demand_kw"]["battery_1"]
+        != fresh_second[0]["demand_kw"]["battery_1"]
+    )
+
+    assert _stuck_one_step_run(50.0, reused) == fresh_first
+    # A leaked last-good SOC would make this run bid like the first (50%).
+    assert _stuck_one_step_run(80.0, reused) == fresh_second
+
+
+def test_reused_sensor_injector_after_full_run_restarts_cleanly():
+    # A dropout label carries None/finite values, so full-record equality is
+    # meaningful (a nan fault would embed NaN and never compare equal).
+    spec = {"type": "dropout", "key": "battery_soc_pct", "start_step": 100, "end_step": 104}
+    reused = FaultInjector(FaultConfig(enabled=True, seed=3, faults=[spec]))
+    first = run_closed_loop(
+        make_test_twin(closed_loop=True), hybrid_allocate,
+        on_bad_reading="hold_last", sensor_faults=reused,
+    )
+    fresh = run_closed_loop(
+        make_test_twin(closed_loop=True), hybrid_allocate,
+        on_bad_reading="hold_last",
+        sensor_faults=FaultConfig(enabled=True, seed=3, faults=[spec]),
+    )
+    assert first == fresh
+    # No chronological-order error or stale last-good from the first run.
+    again = run_closed_loop(
+        make_test_twin(closed_loop=True), hybrid_allocate,
+        on_bad_reading="hold_last", sensor_faults=reused,
+    )
+    assert again == fresh
+
+
+def test_reused_device_injector_starts_each_run_from_its_config():
+    spec = {"type": "inverter_trip", "start_step": 5, "end_step": 6}
+    reused = DeviceFaultInjector(DeviceFaultConfig(enabled=True, faults=[spec]))
+
+    def run(device_faults):
+        return run_closed_loop(
+            make_test_twin(closed_loop=True), hybrid_allocate, steps=10,
+            device_faults=device_faults,
+        )
+
+    fresh = run(DeviceFaultConfig(enabled=True, faults=[spec]))
+    assert run(reused) == fresh
+    # The second reuse must not hit leftover chronology state.
+    assert run(reused) == fresh

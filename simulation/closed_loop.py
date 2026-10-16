@@ -84,20 +84,29 @@ def _build_closed_loop_agents(twin):
 
 
 def _coerce_sensor_injector(source):
-    """Normalize a sensor fault config/injector to a FaultInjector or None."""
+    """Normalize a sensor fault config/injector to a run-local FaultInjector.
+
+    A supplied injector is treated as a template: a fresh instance is built
+    from its configuration so a reused injector cannot leak ``_last_good``
+    or its chronological/RNG state from one fresh twin into the next run.
+    """
     if source is None:
         return None
     if isinstance(source, FaultInjector):
-        return source
+        return FaultInjector(source.config)
     return FaultInjector(source)
 
 
 def _coerce_device_injector(source):
-    """Normalize a device fault config/injector to a DeviceFaultInjector or None."""
+    """Normalize a device fault config/injector to a run-local injector.
+
+    As with sensor faults, a supplied ``DeviceFaultInjector`` is rebuilt
+    from its configuration so reused instances start with fresh state.
+    """
     if source is None:
         return None
     if isinstance(source, DeviceFaultInjector):
-        return source
+        return DeviceFaultInjector(source.config)
     return DeviceFaultInjector(source)
 
 
@@ -233,7 +242,7 @@ def _sanitize_observation(observation, watch, policy, max_hold_steps, state):
                     "agent_id": agent_id,
                     "key": key,
                     "policy": "hold_last",
-                    "observed": raw,
+                    "observed": None if raw is _MISSING else raw,
                     "used": previous,
                 })
             else:
@@ -407,11 +416,14 @@ def run_closed_loop(
     the clean demand and battery supply/headroom by the clean twin SOC.
 
     ``sensor_faults`` and ``device_faults`` accept a config, an injector, or
-    ``None`` (feature off). Device faults (``inverter_trip``,
-    ``charger_fault``, ``battery_derate``) change delivered physics through
-    the commit path. Every substitution and active fault is added to the
-    step record only when the corresponding fault feature is enabled, so a
-    run without faults is byte-identical to one before this feature.
+    ``None`` (feature off). A supplied injector is used as a template: the
+    runner builds a fresh run-local instance from its configuration, so the
+    same injector can be reused across runs without leaking state. Device
+    faults (``inverter_trip``, ``charger_fault``, ``battery_derate``) change
+    delivered physics through the commit path. Every substitution and active
+    fault is added to the step record only when the corresponding fault
+    feature is enabled, so a run without faults is byte-identical to one
+    before this feature.
     """
     if not getattr(twin, "_closed_loop", False):
         raise ValueError("run_closed_loop requires a twin configured with closed_loop=True")
