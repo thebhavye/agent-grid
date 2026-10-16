@@ -15,14 +15,14 @@ Usage:
 """
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
 from digital_twin.weather_client import WeatherClient
 from digital_twin.solar_model import SolarModel, SolarModelConfig
 from digital_twin.battery_model import BatteryModel, BatteryModelConfig
-from digital_twin.ev_model import EVModel, EVModelConfig, EVScenario
+from digital_twin.ev_model import EVModel, EVModelConfig
 from digital_twin.appliance_model import ApplianceModel, ApplianceModelConfig
 
 
@@ -96,7 +96,6 @@ class DigitalTwin:
         )
 
         # Initialize sub-models at start time
-        self._solar_initialized = False
         self._initialize_models()
 
     def _initialize_models(self) -> None:

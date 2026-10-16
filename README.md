@@ -22,6 +22,8 @@ This repository is private pending a planned patent filing.
 
 From the repository root (CI uses Python 3.13):
 
+Dependencies are pinned in `requirements.txt`; bump pins from a fresh Python 3.13 environment's `pip freeze` and rerun the offline suite and `ruff check .`.
+
 ```bash
 python -m pip install -r requirements.txt
 python -m pytest . -m "not live"

@@ -20,8 +20,7 @@ Design: The network layer can be mocked easily by passing a custom
 
 import json
 import logging
-import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlencode
