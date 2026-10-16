@@ -6,9 +6,10 @@
   (self.missed_windows, cleared on update_state, deduplicated per
   timestep — see decisions.md, issue #10), not persisted, logged to
   file, or user-facing.
-- EV target SOC is hardcoded to 100% in get_demand_kw() and
-  compute_urgency() — no per-row or per-agent target field exists in the
-  dataset yet.
+- EV target SOC and ready-by time are configurable per agent or per row
+  (issue #62); the generator does not emit preference columns yet. Defaults
+  remain 100% SOC by the reported departure. Twin charging segments are
+  configured separately and are not changed by agent preferences.
 - Appliance deferable window ramp assumes a fixed 4-hour (240 min) window
   for all deferable appliances — not derived per-appliance from the
   dataset.

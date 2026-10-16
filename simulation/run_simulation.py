@@ -132,6 +132,25 @@ def _coerce_roster_records(appliances_df):
     )
 
 
+def _dataframe_rows(frame):
+    """Treat missing optional preference cells as absent row overrides."""
+    import pandas as pd
+
+    rows = frame.to_dict(orient="records")
+    if isinstance(frame, pd.DataFrame):
+        for key in ("ev_target_soc_pct", "ev_ready_by_min"):
+            if key not in frame.columns:
+                continue
+            # Read original cells: to_dict() converts pd.NA to None, losing
+            # the distinction between missing and an explicit deadline reset.
+            for row, value in zip(rows, frame[key].array):
+                if key == "ev_ready_by_min" and value is None:
+                    row[key] = None
+                elif pd.isna(value):
+                    row.pop(key, None)
+    return rows
+
+
 def _normalize_inputs(dataset, appliances_df):
     """Accept the real two-table dataset dict, a bare timeseries
     DataFrame, or a legacy list of row dicts.
@@ -142,16 +161,17 @@ def _normalize_inputs(dataset, appliances_df):
     if isinstance(dataset, dict) and "timeseries" in dataset:
         ts = dataset["timeseries"]
         ap = dataset.get("appliances", appliances_df)
-        rows = ts.to_dict(orient="records") if hasattr(ts, "to_dict") else list(ts)
+        rows = _dataframe_rows(ts) if hasattr(ts, "to_dict") else list(ts)
         return rows, ap
     if hasattr(dataset, "to_dict"):
         # Bare timeseries DataFrame passed directly.
-        return dataset.to_dict(orient="records"), appliances_df
+        return _dataframe_rows(dataset), appliances_df
     # Legacy list-of-dicts path (used by test_baseline.py).
     return list(dataset), appliances_df
 
 
-def _build_agents(appliances_df, ev_max_charge_kw=None):
+def _build_agents(appliances_df, ev_max_charge_kw=None,
+                  ev_target_soc_pct=100.0, ev_ready_by_min=None):
     """One singleton each for solar/battery/EV plus one agent per
     appliance roster entry (or fallback agents when no roster is
     supplied, e.g. legacy fake rows).
@@ -213,7 +233,9 @@ def _build_agents(appliances_df, ev_max_charge_kw=None):
             raise ValueError("EV charging rate must be a positive finite number.") from exc
         if not math.isfinite(ev_power) or ev_power <= 0:
             raise ValueError("EV charging rate must be a positive finite number.")
-        agents = [solar, battery, EVAgent("ev_1", max_charge_kw=ev_power)]
+        agents = [solar, battery, EVAgent("ev_1", max_charge_kw=ev_power,
+                                          target_soc_pct=ev_target_soc_pct,
+                                          ready_by_min=ev_ready_by_min)]
         for entry in roster:
             aid = entry["appliance_id"]
             if aid == "ev_charger":
@@ -236,13 +258,14 @@ def _build_agents(appliances_df, ev_max_charge_kw=None):
             EVAgent("ev_1", max_charge_kw=(
                 ev_max_charge_kw if ev_max_charge_kw is not None
                 else LEGACY_EV_MAX_CHARGE_KW_FALLBACK
-            )),
+            ), target_soc_pct=ev_target_soc_pct, ready_by_min=ev_ready_by_min),
             ApplianceAgent("appliance_1"),
         ]
     return agents
 
 
-def run_simulation(dataset, allocator, appliances_df=None, ev_max_charge_kw=None):
+def run_simulation(dataset, allocator, appliances_df=None, ev_max_charge_kw=None,
+                   ev_target_soc_pct=100.0, ev_ready_by_min=None):
     """Run an allocator once for every row/timestep in the dataset.
 
     Agents are instantiated once (not per timestep), refreshed via
@@ -253,11 +276,16 @@ def run_simulation(dataset, allocator, appliances_df=None, ev_max_charge_kw=None
     The allocator is passed as an argument so the baseline can later be
     replaced by a smarter allocation strategy without changing this loop.
     ev_max_charge_kw optionally overrides the roster's ev_charger rating
-    for the EVAgent. Twin callers should prefer run_twin_simulation so
-    the roster and EV rate are taken from the same configured twin.
+    for the EVAgent. ev_target_soc_pct and ev_ready_by_min set EV preferences;
+    optional row keys with the same names override them for that step only.
+    A row ready-by of None uses the reported departure. Twin callers should
+    prefer run_twin_simulation so the roster and EV rate are taken from the
+    same configured twin.
     """
     rows, resolved_appliances_df = _normalize_inputs(dataset, appliances_df)
-    agents = _build_agents(resolved_appliances_df, ev_max_charge_kw=ev_max_charge_kw)
+    agents = _build_agents(resolved_appliances_df, ev_max_charge_kw=ev_max_charge_kw,
+                           ev_target_soc_pct=ev_target_soc_pct,
+                           ev_ready_by_min=ev_ready_by_min)
 
     results = []
 

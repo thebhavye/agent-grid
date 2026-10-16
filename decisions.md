@@ -351,3 +351,25 @@ durations and finite numeric parameters before use. Probability events extend
 as chronological observations arrive, without a fixed horizon; expired events
 are discarded. The first configured active fault wins on overlap. A stuck
 sensor without a prior good sample freezes its first available reading.
+
+## EV user preferences (issue #62)
+EVAgent accepts target_soc_pct (default 100%) and ready_by_min (default
+None, using reported departure). Targets must be finite in (0, 100];
+ready-by must be None or finite in [0, 1440). Invalid preferences raise
+ValueError at construction or row update, even when the EV is unplugged.
+Optional ev_target_soc_pct and ev_ready_by_min row keys override constructor
+preferences for that step only; absent keys restore constructor defaults.
+An explicit row ready-by of None selects the reported departure.
+Demand retains max_charge_kw times the positive SOC gap divided by 100;
+urgency uses that same target gap and the existing overnight-wrapped time
+pressure, returning zero at or above target. Existing sensor validation
+still applies, including non-finite reported departure values.
+_build_agents and run_simulation pass both preferences through. Defaults
+preserve existing bids; twin EV models and charging segments are unchanged.
+
+At the DataFrame input boundary, missing preference cells (NaN/pd.NA) mean
+no override and restore constructor defaults. Sensor NaNs and infinities
+remain invalid, as do NaN preferences supplied directly to EVAgent or in
+list-of-dict inputs. For an explicit per-row ready-by reset, use an object
+column containing None; pd.NA means absent. Numeric columns collapse None
+to NaN and cannot preserve that distinction. Source DataFrames are unchanged.
