@@ -6,6 +6,20 @@ from simulation.baseline_allocator import _require_valid_kw, allocate
 from simulation.hybrid_arbiter import hybrid_allocate
 
 
+def _flexible_groups(bids, priorities):
+    """Identify the arbiter's fixed-anchor bands and priority subgroups."""
+    ordered = [(float(b["urgency"]), priorities.get(b["agent_id"], 5), b["agent_id"])
+               for b in bids if priorities.get(b["agent_id"], 5) > 2]
+    ordered.sort(key=lambda item: (-item[0], item[1], item[2]))
+    groups = {}
+    anchor = None
+    for urgency, priority, key in ordered:
+        if anchor is None or anchor - urgency > 1e-9:
+            anchor = urgency
+        groups[key] = (anchor, priority)
+    return groups
+
+
 def build_step_facts(timestamp, available_kw, bids, priorities, allocation,
                      missed_windows=(), *, strategy="hybrid") -> dict:
     """Describe one hybrid or baseline allocation without changing inputs.
@@ -21,11 +35,20 @@ def build_step_facts(timestamp, available_kw, bids, priorities, allocation,
         raise ValueError("strategy must be hybrid or baseline")
     available = _require_valid_kw(available_kw, "available_kw")
     bids = [dict(bid) for bid in bids]
-    # Reuse the arbiter's validation, including urgency, IDs and priorities.
-    expected = hybrid_allocate(available, bids, priorities)
-    demands = {bid["agent_id"]: float(bid["demand_kw"]) for bid in bids}
+    demands = {}
+    for bid in bids:
+        key = bid["agent_id"]
+        if key in demands:
+            raise ValueError(f"duplicate agent_id: {key!r}")
+        demands[key] = _require_valid_kw(bid["demand_kw"], key)
+        if not math.isfinite(float(bid["urgency"])):
+            raise ValueError(f"urgency for {key!r} must be finite")
     if strategy == "baseline":
         expected = allocate(available, demands)
+        groups = {}
+    else:
+        expected = hybrid_allocate(available, bids, priorities)
+        groups = _flexible_groups(bids, priorities)
     if set(allocation) - set(demands):
         raise ValueError("allocation contains unknown agents")
     actual = {}
@@ -51,15 +74,16 @@ def build_step_facts(timestamp, available_kw, bids, priorities, allocation,
         raise ValueError("missed window contains unknown agents")
 
     shortage = math.fsum(demands.values()) > available
-    critical_served = any(priorities.get(key, 5) <= 2 and value > 0
-                          for key, value in actual.items())
-    flexible_served = any(priorities.get(key, 5) > 2 and value > 0
-                          for key, value in actual.items())
+    critical_served = strategy == "hybrid" and any(
+        priorities.get(key, 5) <= 2 and value > 0 for key, value in actual.items())
+    flexible_served = strategy == "hybrid" and any(
+        priorities.get(key, 5) > 2 and value > 0 for key, value in actual.items())
     agents = []
     for bid in sorted(bids, key=lambda item: item["agent_id"]):
         key = bid["agent_id"]
         demand, served = demands[key], actual[key]
-        priority = int(priorities.get(key, 5))
+        priority = (int(priorities.get(key, 5)) if strategy == "hybrid"
+                    else priorities.get(key, 5))
         if key in missed:
             reason = "missed_window"
         elif demand == 0:
@@ -67,8 +91,20 @@ def build_step_facts(timestamp, available_kw, bids, priorities, allocation,
         elif served == demand:
             reason = ("critical_first" if strategy == "hybrid" and priority <= 2
                       and shortage else "fully_served")
-        elif strategy == "baseline" or priority <= 2 or served > 0 or available == 0:
+        elif strategy == "baseline" or priority <= 2 or available == 0:
             reason = "shared_proportionally"
+        elif served > 0:
+            peers = sum(demands[other] > 0 for other in groups
+                        if groups[other] == groups[key])
+            earlier_service = any(value > 0 and groups.get(other) != groups[key]
+                                  for other, value in actual.items())
+            if peers > 1 or not earlier_service:
+                reason = "shared_proportionally"
+            elif not any(value > 0 and other != key for other, value in actual.items()
+                         if other in groups):
+                reason = "critical_first"
+            else:
+                reason = "deferred_lower_urgency"
         elif critical_served and not flexible_served:
             reason = "critical_first"
         else:

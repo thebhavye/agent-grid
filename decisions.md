@@ -303,7 +303,12 @@ precision; template kW values display six decimal places. Agent output is
 sorted by ID, and no inputs are mutated. Zero demand has served_fraction
 1.0. Missed-window events are the agent's existing reported events, not
 proof of an incomplete physical appliance cycle. They override the reason.
-Baseline shortages use shared_proportionally. Hybrid reasons describe
+Baseline shortages use shared_proportionally; baseline priority metadata
+and finite urgency values do not undergo hybrid range/type checks.
+Partially served flexible singletons reflect earlier-group precedence;
+proportional sharing applies to actual peer groups (or a lone group with
+no earlier service). Urgency bands use the arbiter's fixed-anchor tolerance.
+Hybrid reasons describe
 critical precedence, proportional groups and deferred flexible groups;
 the fixed deferred_lower_urgency code includes priority tie-breaks, so
 its text says earlier urgency/priority groups rather than asserting a

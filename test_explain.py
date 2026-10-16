@@ -107,6 +107,49 @@ def test_strategy_cannot_mislabel_baseline_as_hybrid():
                          {"a": .5, "b": .5})
 
 
+@pytest.mark.parametrize("priority", [None, "unranked", 0, 6, 2.5])
+@pytest.mark.parametrize("urgency", [-1, 2])
+def test_baseline_ignores_hybrid_policy_metadata(priority, urgency):
+    facts = facts_for([bid("a", 2, urgency)], 1, {"a": priority}, "baseline")
+    agent = facts["agents"][0]
+    assert agent["allocated_kw"] == 1 and agent["served_fraction"] == .5
+    assert agent["priority"] == priority and agent["urgency"] == urgency
+    assert agent["reason"] == "shared_proportionally"
+
+
+@pytest.mark.parametrize("urgencies,priorities", [((.5, .5), {"a": 3, "b": 4}),
+                                                ((.9, .1), {"a": 3, "b": 3})])
+def test_partial_singleton_after_earlier_flexible_group_is_deferred(urgencies, priorities):
+    facts = facts_for([bid("a", urgency=urgencies[0]), bid("b", urgency=urgencies[1])],
+                      1.5, priorities)
+    assert facts["agents"][1]["allocated_kw"] == .5
+    assert facts["agents"][1]["reason"] == "deferred_lower_urgency"
+
+
+def test_lone_partial_group_does_not_invent_an_earlier_group():
+    facts = facts_for([bid("a")], .5)
+    assert facts["agents"][0]["reason"] == "shared_proportionally"
+
+
+def test_flexible_group_uses_fixed_anchor_not_transitive_urgency_chain():
+    facts = facts_for([bid("a", urgency=.9), bid("b", urgency=.9 - .75e-9),
+                       bid("c", urgency=.9 - 1.5e-9)], 2.5)
+    assert facts["agents"][2]["allocated_kw"] == .5
+    assert facts["agents"][2]["reason"] == "deferred_lower_urgency"
+
+
+@pytest.mark.parametrize("strategy", ["hybrid", "baseline"])
+def test_duplicate_bids_are_rejected_in_each_strategy(strategy):
+    with pytest.raises(ValueError, match="duplicate"):
+        build_step_facts("00:00", 1, [bid("a"), bid("a")], {}, {"a": 1}, strategy=strategy)
+
+
+def test_partial_flexible_singleton_after_critical_group():
+    facts = facts_for([bid("a"), bid("b")], 1.5, {"a": 1})
+    assert facts["agents"][1]["allocated_kw"] == .5
+    assert facts["agents"][1]["reason"] == "critical_first"
+
+
 def test_pure_deterministic_order_and_template():
     bids = [bid("b", 2), bid("a", 4)]
     priorities, allocation = {"a": 3}, {"a": 3., "b": 0.}
