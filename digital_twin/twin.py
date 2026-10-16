@@ -155,6 +155,15 @@ class DigitalTwin:
         )
 
         if self._closed_loop:
+            # Submodels advance before sampling; anchor that sample to this
+            # interval's start even when its duration differs from the last.
+            minute = (
+                self._current_time.hour * 60 + self._current_time.minute
+                + self._current_time.second / 60
+                + self._current_time.microsecond / 60_000_000
+            )
+            self._appliances._current_minute = minute - time_delta_min
+            self._ev._current_minute = minute - time_delta_min
             appliance_result = self._appliances.observe(time_delta_min)
             ev_result = self._ev.observe(time_delta_min)
             desired = dict(appliance_result["appliance_desired_kw"])

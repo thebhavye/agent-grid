@@ -823,6 +823,28 @@ class TestApplianceModel:
 # ---------------------------------------------------------------------------
 
 class TestDigitalTwin:
+    @pytest.mark.parametrize("start", [
+        datetime(2024, 1, 15, 7, 5),
+        datetime(2024, 1, 15, 23, 59, 30, tzinfo=timezone.utc),
+    ])
+    def test_closed_loop_mixed_steps_sample_interval_start(self, start):
+        twin = self._closed_twin(seed=7)
+        for _ in range(2):
+            twin.reset(start)
+            for dt in (15, 2.5, 5, 0.25):
+                before = twin.current_time
+                minute = (before.hour * 60 + before.minute
+                          + before.second / 60 + before.microsecond / 60_000_000)
+                obs = twin.observe(dt)
+                assert twin._ev.current_minute == pytest.approx(minute)
+                assert twin._appliances.current_minute == pytest.approx(minute)
+                assert twin.current_time == before
+                if before.hour == 7 and before.minute == 5:
+                    assert obs["ev_plugged_in"] is True
+                row = twin.commit({})
+                assert row["timestamp"] == before.strftime("%H:%M")
+                assert twin.current_time == before + timedelta(minutes=dt)
+
     @staticmethod
     def _closed_twin(seed=7, scenario=EVScenario.OVERNIGHT, **overrides):
         client, _ = _mock_client()
