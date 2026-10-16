@@ -25,7 +25,51 @@ def test_critical_first_and_proportional_shortage():
     bids = [bid("a", 1, 0), bid("b", 3, 0), bid("flex", 8, 1)]
     priorities = {"a": 1, "b": 2, "flex": 3}
     assert hybrid_allocate(6, bids, priorities) == {"a": 1, "b": 3, "flex": 2}
-    assert hybrid_allocate(2, bids, priorities) == {"a": 0.5, "b": 1.5, "flex": 0}
+    assert hybrid_allocate(2, bids, priorities) == {"a": 1, "b": 1, "flex": 0}
+
+
+@pytest.mark.parametrize("available, expected", [
+    (0, (0, 0, 0, 0, 0)),
+    (2, (0.5, 1.5, 0, 0, 0)),
+    (4, (1, 3, 0, 0, 0)),
+    (6, (1, 3, 0.5, 1.5, 0)),
+    (8, (1, 3, 1, 3, 0)),
+    (9, (1, 3, 1, 3, 1)),
+])
+def test_critical_priority_groups_share_only_after_preceding_group(available, expected):
+    bids = [bid("a", 1, 0), bid("b", 3, 1),
+            bid("c", 1, 1), bid("d", 3, 0), bid("flex", 8, 1)]
+    priorities = {"a": 1, "b": 1, "c": 2, "d": 2, "flex": 3}
+    result = hybrid_allocate(available, bids, priorities)
+    assert result == dict(zip(("a", "b", "c", "d", "flex"), expected))
+    assert all(isinstance(value, float) for value in result.values())
+    assert hybrid_allocate(available, list(reversed(bids)), priorities) == result
+
+
+def test_randomized_caps_balance_order_and_critical_precedence():
+    rng = np.random.default_rng(55)
+    for _ in range(300):
+        bids = [bid(str(i), float(rng.uniform(0, 10)), float(rng.random()))
+                for i in range(15)]
+        priorities = {str(i): i % 5 + 1 for i in range(15)}
+        demands = {item["agent_id"]: item["demand_kw"] for item in bids}
+        p1_demand = sum(demands[key] for key in demands if priorities[key] == 1)
+        p2_demand = sum(demands[key] for key in demands if priorities[key] == 2)
+        for available in (p1_demand * 0.5, p1_demand + p2_demand * 0.5,
+                          float(rng.uniform(0, sum(demands.values()) * 1.2))):
+            result = hybrid_allocate(available, bids, priorities)
+            assert set(result) == set(demands)
+            assert all(0 <= value <= demands[key] for key, value in result.items())
+            assert sum(result.values()) == pytest.approx(
+                min(available, sum(demands.values())), abs=1e-12)
+            if any(result[key] > 0 for key in result if priorities[key] == 2):
+                for key in result:
+                    if priorities[key] == 1:
+                        assert result[key] == demands[key]
+            if available < p1_demand + p2_demand:
+                assert all(result[key] == 0.0 for key in result if priorities[key] > 2)
+            rng.shuffle(bids)
+            assert hybrid_allocate(available, bids, priorities) == result
 
 
 def test_urgency_before_priority_and_missing_priority_defaults_to_five():
