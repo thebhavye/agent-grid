@@ -22,6 +22,7 @@ STRATEGIES = {
 }
 
 SCENARIO_NOTES = {
+    "demo_sunny_home": "Sunny Vellore day, 60 m2 array (12 kWp), battery 50% / 12 kWh",
     "clear_day": "Sunny Vellore day (25 Jan 2024), battery 50%",
     "monsoon_cloudy": "Overcast monsoon day (4 Dec 2023), weak solar",
     "heatwave": "Hot pre-monsoon day (1 May 2024), panel derating",

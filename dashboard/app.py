@@ -149,7 +149,7 @@ with st.sidebar:
     st.header("⚡ AgentGrid")
     st.caption("Multi-agent power allocation for a residential microgrid")
     scenario = st.selectbox("Scenario", list_scenarios(),
-                            index=list_scenarios().index("clear_day"),
+                            index=list_scenarios().index("demo_sunny_home"),
                             format_func=lambda s: s.replace("_", " ").capitalize())
     st.caption(data.SCENARIO_NOTES.get(scenario, ""))
     strategy = st.radio("Allocation strategy", list(data.STRATEGIES),
