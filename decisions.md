@@ -424,8 +424,7 @@ follow-up once the scenario library is merged, not a dependency of this change.
 Review clarification: "single overnight segment" is implemented as one logical
 connection represented by two day-bounded intervals, not a wrapping EVSegment.
 This reconciles the explicit 0 <= start < end <= 1440 constraint with overnight
-charging. Issue-owner confirmation of that acceptance interpretation is still
-required before merge; this documentation does not claim that approval.
+charging. This interpretation was accepted at merge review (2026-10-16).
 
 The custom scenario sentinel is deliberately a string rather than an extra
 random-selectable enum member. Consumers must not assume .value is available
