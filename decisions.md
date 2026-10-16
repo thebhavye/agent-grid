@@ -420,3 +420,14 @@ efficiency, maximum power and capacity limits; autonomous mode retains its
 existing per-interval ramp. reset() preserves custom intervals and replays the
 same seeded behavior. The late_ev_arrival scenario catalog integration is a
 follow-up once the scenario library is merged, not a dependency of this change.
+
+Review clarification: "single overnight segment" is implemented as one logical
+connection represented by two day-bounded intervals, not a wrapping EVSegment.
+This reconciles the explicit 0 <= start < end <= 1440 constraint with overnight
+charging. Issue-owner confirmation of that acceptance interpretation is still
+required before merge; this documentation does not claim that approval.
+
+The custom scenario sentinel is deliberately a string rather than an extra
+random-selectable enum member. Consumers must not assume .value is available
+for custom schedules. EVSegment's former start_min/end_min constructor keyword
+names are not supported; positional construction and read-only aliases remain.

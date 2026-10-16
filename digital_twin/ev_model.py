@@ -42,6 +42,9 @@ class EVSegment:
     Represent 23:30 -> 06:00 with sorted intervals [0, 360) and [1410, 1440),
     as in the built-in overnight scenario. A continuous midnight connection
     does not reset SOC. The two intervals describe one overnight connection.
+
+    Constructor keywords are plug_in_min/departure_min. The former
+    start_min/end_min names remain read-only aliases, not constructor keywords.
     """
     plug_in_min: float
     departure_min: float
@@ -236,7 +239,14 @@ class EVModel:
         self._soc_pct = self._calculate_soc_at_minute(self._current_minute)
 
     def _advance_schedule(self, time_delta_min: float) -> None:
-        """Advance the exogenous clock and resolve plug-in transitions."""
+        """Advance the clock and reset SOC only after an actual unplugged gap.
+
+        Custom schedules inspect the traversed segment boundaries because both
+        sampled endpoints may be plugged in despite an intervening departure.
+        Adjacent intervals, including midnight continuity, do not reset SOC.
+        Clock/index alignment distinguishes initial twin sampling from a wrap;
+        random scenarios retain the original endpoint-transition behavior.
+        """
         previous_minute = self._current_minute % 1440
         previous_segment = self._active_segment_idx
         self._current_minute = (self._current_minute + time_delta_min) % 1440
@@ -372,6 +382,11 @@ class EVModel:
 
     @property
     def scenario(self) -> EVScenario | str:
+        """Return a built-in EVScenario, or the literal 'custom' for segments.
+
+        Custom is not a random-selectable enum member. Callers needing a plain
+        string can use getattr(model.scenario, "value", model.scenario).
+        """
         return self._scenario
 
     @property
