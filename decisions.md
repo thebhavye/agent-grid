@@ -384,3 +384,54 @@ Critical reasons follow the separate priority-1 and priority-2 pools: a
 priority-2 singleton limited by earlier priority-1 service reports
 critical_first. Actual priority-2 peers still report proportional sharing
 within their own pool; no sharing across critical priorities is implied.
+
+## Issue #57 - Outcome metrics and paired comparison
+
+Decision: score committed closed-loop records and compare separate twins using
+identical initial state, physics, seeds, timestep, and the existing synthetic
+weather fixture. Weather caches are isolated; no network is used. Before scoring,
+compare solar, EV connection/departure/target series and all drawn appliance cycle
+starts, including initialization draws. Accepted starts and later demand can
+legitimately differ with allocations; these are outcomes, not fairness inputs.
+
+The runner adds observational metadata only: priorities, reserve, segment target,
+real departures, cycle completion/deadline events, blocked-start increments and
+start draws. No bids, allocation policies, RNG draws or physics are changed.
+A regression test compares all previous record fields with telemetry disabled.
+
+Energy uses each record's dt_min. Unmet load includes base load and EV once,
+excluding the battery storage bid and solar. Battery energies are electrical
+terminal kWh, positive battery_kw charging and negative discharging. EV shortfall
+is summed percentage-point deficit at each real departure using the last
+plugged interval's committed SOC and that segment's target; meeting it adds zero.
+Continuous overnight connection at midnight and a truncated run are not
+additional departures. Cycle misses are counted at window end even if a cycle
+later completes; blocked starts are increments, not repeated cumulative totals.
+Reserve counting tolerates only 1e-9 percentage points of floating-point noise.
+Balance is recomputed from actual appliance/EV service, served base load, solar,
+signed battery power and curtailment, with no EV display-load double counting.
+
+Measured with python -m simulation.compare: seeds 1, 7, 42 across overnight,
+midday and evening_topup, each 288 five-minute steps, two strategies per pair.
+All 18 runs have balance errors below 1e-6 kW (maximum 1.088018564e-14 kW)
+and zero battery reserve violations. Full hybrid/baseline/delta values for all
+12 metrics are saved in simulation/comparison_results.md and the PR description.
+The following deltas are hybrid minus baseline:
+
+| Seed | EV scenario | Critical unmet delta (kWh) | Flexible unmet delta (kWh) | Departure shortfall delta (pp) |
+|---|---|---|---|---|
+| 1 | overnight | -1.273225817 | 3.984209366 | 0.29066547 |
+| 1 | midday | -4.720696896 | 38.60869739 | 3.967829883 |
+| 1 | evening_topup | -0.9575598701 | 3.624287337 | 1.191216758 |
+| 7 | overnight | -1.330639928 | 3.120719413 | 0.7139311619 |
+| 7 | midday | -4.331048275 | 49.51918374 | 2.629671815 |
+| 7 | evening_topup | -0.7538255529 | 2.317095053 | 1.01350414 |
+| 42 | overnight | -1.352072885 | 3.063224573 | 1.074269437 |
+| 42 | midday | -3.430880178 | 10.11872226 | 3.453560144 |
+| 42 | evening_topup | -0.7258181343 | 2.850443566 | 1.006303087 |
+
+Hybrid protects critical loads better in all nine pairs but has higher flexible
+unmet energy and EV departure shortfall in every pair; there is no overall
+superiority claim. Three seeds, one synthetic weather day and a one-day horizon
+are limited evidence. The overnight evening segment's next morning departure is
+outside the horizon, and allocation-dependent requests need not total equally.

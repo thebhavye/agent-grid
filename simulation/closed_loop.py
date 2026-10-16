@@ -188,6 +188,58 @@ def _step_record(
     }
 
 
+def _outcome_metadata(twin, start, dt_min, states, blocked_before, drawn_before,
+                      priorities, reserve_pct, observation, committed):
+    """Capture outcomes without advancing models or drawing randomness.
+
+    A missed deadline and eventual cycle completion are separate events. EV
+    midnight segment changes are not departures when the connection continues.
+    """
+    model = twin._appliances
+    minute = start.hour * 60 + start.minute + start.second / 60 + start.microsecond / 6e7
+    completed, incomplete = [], []
+    for spec in model.config.appliances:
+        if spec.appliance_id not in states:
+            continue
+        before = states[spec.appliance_id]
+        after = model.get_appliance_state(spec.appliance_id)
+        if before["is_on"] and not after["is_on"]:
+            completed.append(spec.appliance_id)
+        if (before["is_on"] and spec.usual_end_min is not None
+                and model._in_usual_window(spec, minute)):
+            until_end = (spec.usual_end_min - minute) % 1440
+            desired = observation["appliance_desired_kw"][spec.appliance_id]
+            served = committed["appliance_served_kw"][spec.appliance_id]
+            progress = until_end * served / desired if desired else 0.0
+            if (0 < until_end <= dt_min
+                    and before["time_remaining_min"] - progress > _EPSILON):
+                incomplete.append(spec.appliance_id)
+    ev = twin._ev
+    segment = ev._segments[ev._active_segment_idx] if ev.plugged_in else None
+    departures = []
+    if segment is not None:
+        until_end = (segment.end_min - minute) % 1440
+        if (0 < until_end <= dt_min
+                and ev._find_active_segment(segment.end_min % 1440) is None):
+            departures.append({"target_soc_pct": segment.target_soc,
+                               "soc_pct": ev.soc_pct})
+    drawn = model.drawn_cycle_start_times
+    blocked = model.blocked_starts
+    return {
+        "priorities": dict(priorities),
+        "battery_reserve_pct": float(reserve_pct),
+        "ev_target_soc_pct": float(segment.target_soc) if segment else None,
+        "ev_departure_min": float(segment.end_min % 1440) if segment else None,
+        "ev_departures": departures,
+        "appliance_cycles_completed": completed,
+        "appliance_cycles_incomplete_at_window_end": incomplete,
+        "blocked_starts": {key: blocked[key] - blocked_before[key] for key in states},
+        "drawn_cycle_starts": {
+            key: values[drawn_before.get(key, 0):] for key, values in drawn.items()
+        },
+    }
+
+
 def run_closed_loop(
     twin,
     allocator: Allocator,
@@ -214,7 +266,17 @@ def run_closed_loop(
     records = []
 
     for _ in range(steps):
+        start = twin.current_time
+        blocked_before = twin._appliances.blocked_starts
+        drawn_before = ({key: len(value) for key, value in
+                         twin._appliances.drawn_cycle_start_times.items()}
+                        if twin.step_count else {})
         observation = twin.observe()
+        states = {
+            spec.appliance_id: dict(twin._appliances.get_appliance_state(spec.appliance_id))
+            for spec in twin._appliances.config.appliances
+            if spec.deferable and spec.appliance_id != "ev_charger"
+        }
         # Display-rounded SOC must not create energy or cross reserve limits.
         observation["battery_soc_pct"] = twin._battery.soc_pct
         observation["ev_soc_pct"] = twin._ev.soc_pct
@@ -356,7 +418,7 @@ def run_closed_loop(
         committed["battery_soc_pct"] = twin._battery.soc_pct
         committed["ev_soc_pct"] = twin._ev.soc_pct
 
-        records.append(_step_record(
+        record = _step_record(
             observation,
             dt_min,
             mode["mode"],
@@ -366,6 +428,11 @@ def run_closed_loop(
             float(committed["battery_applied_kw"]),
             curtailed_kw,
             committed,
+        )
+        record.update(_outcome_metadata(
+            twin, start, dt_min, states, blocked_before, drawn_before,
+            priorities, battery.limits.reserve_pct, observation, committed,
         ))
+        records.append(record)
 
     return records
