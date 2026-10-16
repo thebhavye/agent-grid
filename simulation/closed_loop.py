@@ -52,7 +52,7 @@ def _require_finite_nonnegative(value: float, name: str) -> float:
 def _build_priorities(twin) -> dict[str, int]:
     """Build allocator priorities from the twin's configured appliance roster."""
     records = _coerce_roster_records(twin._appliances.config)
-    priorities = {"battery_1": 5}
+    priorities = {"battery_1": 5, "household_base_load": 1}
     ev_priority = 3
     for entry in records or []:
         appliance_id = entry["appliance_id"]
@@ -173,6 +173,7 @@ def _step_record(
         },
         "urgency": {key: value["urgency"] for key, value in agents.items()},
         "battery_kw": float(battery_kw),
+        "ev_applied_kw": float(committed["ev_applied_kw"]),
         "curtailed_kw": float(curtailed_kw),
         "appliances": appliances,
         "appliance_desired_kw": {
@@ -214,7 +215,26 @@ def run_closed_loop(
 
     for _ in range(steps):
         observation = twin.observe()
+        # Display-rounded SOC must not create energy or cross reserve limits.
+        observation["battery_soc_pct"] = twin._battery.soc_pct
+        observation["ev_soc_pct"] = twin._ev.soc_pct
+        observation["solar_gen_kw"] = twin._pending_observation["solar_gen_kw"]
         bids = _bids_for_observation(agents, observation)
+        bids.append({
+            "agent_id": "household_base_load",
+            "demand_kw": _require_finite_nonnegative(
+                twin._appliances.config.base_load_kw, "base_load_kw"
+            ),
+            "urgency": 1.0,
+        })
+        ev_config = twin._ev.config
+        ev_headroom_kw = (
+            (100.0 - twin._ev.soc_pct) / 100 * ev_config.battery_capacity_kwh
+            / ev_config.charge_efficiency / (dt_min / 60)
+        )
+        for bid in bids:
+            if bid["agent_id"] == "ev_1":
+                bid["demand_kw"] = min(bid["demand_kw"], max(0.0, ev_headroom_kw))
 
         battery_demand_kw = _require_finite_nonnegative(
             battery.get_demand_kw(), "battery_demand_kw"
@@ -257,6 +277,7 @@ def run_closed_loop(
             available_kw = float(observation["solar_gen_kw"])
 
         allocations = allocator(available_kw, allocator_bids, priorities)
+        _validate_allocations(allocations, allocator_bids)
         # Allocators omit the battery in discharge/idle mode by design. Keep
         # the record complete by adding an explicit zero battery allocation.
         allocations = {agent_id: float(value) for agent_id, value in allocations.items()}
@@ -300,6 +321,40 @@ def run_closed_loop(
             elif agent_id.startswith("appliance_"):
                 delivered[agent_id] = value
         committed = twin.commit(delivered)
+        actual_load_kw = (
+            allocations["household_base_load"]
+            + sum(committed["appliance_served_kw"].values())
+            + committed["ev_applied_kw"]
+        )
+        if abs(actual_load_kw - delivered_to_loads_kw) > _EPSILON:
+            raise RuntimeError("committed load power differs from allocation")
+        _check_power_balance(
+            observation["solar_gen_kw"], committed["battery_applied_kw"],
+            actual_load_kw, curtailed_kw,
+        )
+        dt_hours = dt_min / 60
+        battery_cfg = twin._battery.config
+        battery_delta_kwh = (
+            (twin._battery.soc_pct - observation["battery_soc_pct"])
+            / 100 * battery_cfg.capacity_kwh
+        )
+        expected_battery_delta = (
+            battery_kw * dt_hours * battery_cfg.charge_efficiency if battery_kw >= 0
+            else battery_kw * dt_hours / battery_cfg.discharge_efficiency
+        )
+        ev_delta_kwh = (
+            (twin._ev.soc_pct - observation["ev_soc_pct"])
+            / 100 * ev_config.battery_capacity_kwh
+        )
+        if (abs(battery_delta_kwh - expected_battery_delta) > _EPSILON
+                or abs(ev_delta_kwh - committed["ev_applied_kw"] * dt_hours
+                       * ev_config.charge_efficiency) > _EPSILON):
+            raise RuntimeError("committed SOC change violates energy accounting")
+        if (observation["battery_soc_pct"] >= battery.limits.reserve_pct
+                and twin._battery.soc_pct < battery.limits.reserve_pct - _EPSILON):
+            raise RuntimeError("battery discharge crossed reserve")
+        committed["battery_soc_pct"] = twin._battery.soc_pct
+        committed["ev_soc_pct"] = twin._ev.soc_pct
 
         records.append(_step_record(
             observation,

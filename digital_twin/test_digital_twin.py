@@ -844,6 +844,7 @@ class TestDigitalTwin:
                 row = twin.commit({})
                 assert row["timestamp"] == before.strftime("%H:%M")
                 assert twin.current_time == before + timedelta(minutes=dt)
+
     @staticmethod
     def _closed_twin(seed=7, scenario=EVScenario.OVERNIGHT, **overrides):
         client, _ = _mock_client()
@@ -986,6 +987,7 @@ class TestDigitalTwin:
         first = run()
         twin.reset()
         assert run() == first
+
     def test_closed_loop_ev_delivery_and_unplugged_guard(self):
         twin = self._closed_twin(seed=42)
         initial = twin._ev.soc_pct

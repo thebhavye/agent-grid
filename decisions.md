@@ -329,3 +329,10 @@ power, and post-commit SOC state. The runner rejects stale or non-closed-loop
 twins and checks allocation caps, charge/discharge exclusivity, power balance,
 and zero curtailment in discharge mode. Metrics and paired outcome scoring
 remain separate follow-up work.
+
+The fixed household base load participates as `household_base_load`, an
+always-on priority-1 bid, so it is included in allocation and battery balance.
+Physical limits and energy checks use unrounded SOC and solar power. EV
+service is recorded separately as `ev_applied_kw`, capped by physical charging
+headroom, and excluded from appliance totals to avoid counting it twice.
+Post-commit balance and SOC checks verify actual delivery, not just requests.
