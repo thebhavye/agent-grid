@@ -15,6 +15,8 @@ from orchestration.graph import build_step_graph, run_graph_closed_loop
 from simulation.closed_loop import (
     _build_closed_loop_agents,
     _build_priorities,
+    _prepare_step,
+    _run_context,
     proportional_adapter,
     run_closed_loop,
 )
@@ -92,6 +94,17 @@ def test_core_imports_do_not_import_langgraph():
                              "assert not any(k.startswith('langgraph') for k in sys.modules)"],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_builder_priorities_are_used_in_committed_record():
+    context = _run_context(make_test_twin(closed_loop=True), hybrid_allocate, 1)
+    priorities = {**context["priorities"], "ev_1": 2}
+    data = _prepare_step(context, 0)
+    result = build_step_graph(context["agents"], priorities, hybrid_allocate).invoke({
+        "obs": data["sanitized"], "bids": {}, "context": context, "data": data,
+    })
+    assert result["record"]["priorities"] == priorities
+    assert context["priorities"]["ev_1"] == 3
 
 
 @pytest.mark.parametrize("steps", [-1, True, 1.5])

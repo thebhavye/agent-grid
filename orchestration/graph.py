@@ -39,6 +39,7 @@ def build_step_graph(agents, priorities, allocator):
     original agent order, independent of worker completion order.
     """
     agents = list(agents)
+    priorities = dict(priorities)
     ids = [agent.agent_id for agent in agents]
     if not ids or len(ids) != len(set(ids)):
         raise ValueError("graph requires non-empty agents with unique IDs")
@@ -72,7 +73,8 @@ def build_step_graph(agents, priorities, allocator):
                 "delivered": data["delivered"]}
 
     def commit(state):
-        return {"record": _commit_step(state["context"], state["data"])}
+        context = {**state["context"], "priorities": priorities}
+        return {"record": _commit_step(context, state["data"])}
 
     builder.add_node("battery_mode", battery_mode)
     builder.add_node("arbiter", arbiter)
