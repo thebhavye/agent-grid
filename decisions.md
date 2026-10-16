@@ -501,3 +501,44 @@ unmet energy and EV departure shortfall in every pair; there is no overall
 superiority claim. Three seeds, one synthetic weather day and a one-day horizon
 are limited evidence. The overnight evening segment's next morning departure is
 outside the horizon, and allocation-dependent requests need not total equally.
+
+## Issue #68 — Runner fault-handling policy and device faults
+Decision: the closed-loop runner owns a configurable
+`on_bad_reading` policy with values `"raise"` (default), `"hold_last"`, and
+`"exclude"`. Agents stay untouched and keep their own fail-fast validation;
+the runner sanitizes observations before calling `update_state`. A bad reading
+is a missing key, a NaN/inf value, or a payload that does not match the key's
+schema (for example a number where an `HH:MM` timestamp belongs). `raise`
+rejects a bad watched reading in the runner rather than relying on the agents,
+because agents substitute silent defaults (a missing SOC becomes 50%) that
+would let a hidden fault masquerade as a good step.
+
+Why agents keep fail-fast behavior: the runner is the only layer that knows
+whether a run wants to survive sensor noise or halt on it. Moving the policy
+into the agents would silently weaken the sensor contracts used elsewhere
+(tests, dataset generation, standalone agent use). Keeping the decision at the
+runner boundary lets `"raise"` remain the unambiguous default for development
+and CI, while exploratory or resilient runs opt in explicitly.
+
+Under `hold_last`, a substituted agent reuses its last good value for each
+affected key until the fault clears, but only for `max_hold_steps` consecutive
+steps (default 3); after that bound the agent is excluded for that step. Under
+`exclude`, an affected agent bids zero for that step, so its demand goes
+unserved; the clean demand is still recorded (`demand_kw` plus an explicit
+`unserved_kw` map) rather than erased by the zero bid. Every substitution is
+logged in the step record as `{agent_id, key, policy, observed, used}`, so
+exports and tests can audit exactly what was replaced and why. Held values are
+bounded by the clean observation so a stale reading cannot request delivery the
+real devices reject: EV and appliance bids are capped by the clean demand, and
+battery supply/headroom by the clean twin SOC, so the power-balance,
+charge/discharge-exclusivity and reserve invariants hold even mid-hold.
+
+Device faults extend the #64 injector in `digital_twin/faults.py` and are
+applied through the twin `commit()` path so they change physics rather than
+just observations: `inverter_trip` delivers zero solar for its window while
+irradiance is unchanged, `charger_fault` caps an EV to zero accepted power
+while plugged in, and `battery_derate` scales the battery's charge and
+discharge ceiling by `factor`. They are labelled in the step record under
+`device_faults`, deterministic by seed, and validated at configuration time.
+Both fault families default off; with them disabled the runner emits records
+identical to a run that never passed fault configuration.
