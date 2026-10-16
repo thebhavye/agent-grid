@@ -7,7 +7,7 @@ All twelve metrics for every pair are below; values use ten significant digits.
 Energy is in kWh, SOC shortfall in percentage points, balance error in kW.
 Count metrics count events (deadline misses may later complete).
 
-+| Seed | Scenario | Metric | Hybrid | Baseline | Hybrid - baseline |
+| Seed | Scenario | Metric | Hybrid | Baseline | Hybrid - baseline |
 |---|---|---|---|---|---|
 | 1 | overnight | critical_unmet_kwh | 6.920283206 | 8.193509023 | -1.273225817 |
 | 1 | overnight | priority_1_unmet_kwh | 5.104966117 | 6.242673541 | -1.137707424 |
