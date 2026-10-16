@@ -36,6 +36,8 @@ class ApplianceAgent(Agent):
         self.appliance_usual_start_min = appliance_usual_start_min
         self.appliance_usual_end_min = appliance_usual_end_min
         self._current_min = None
+        self._desired_kw_override = None
+        self._has_desired_kw_override = False
         self.missed_windows = []
 
     def update_state(self, row):
@@ -48,6 +50,24 @@ class ApplianceAgent(Agent):
         if new_min != self._current_min:
             self.missed_windows = []
         self._current_min = new_min
+
+        desired = row.get("appliance_desired_kw")
+        self._has_desired_kw_override = isinstance(desired, dict)
+        self._desired_kw_override = None
+        if self._has_desired_kw_override:
+            raw_value = desired.get(self.appliance_id, 0.0)
+            try:
+                desired_kw = float(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"appliance desired power for {self.appliance_id!r} must be numeric"
+                ) from exc
+            if not math.isfinite(desired_kw) or desired_kw < 0:
+                raise ValueError(
+                    f"appliance desired power for {self.appliance_id!r} "
+                    "must be finite and non-negative"
+                )
+            self._desired_kw_override = desired_kw
 
     def get_missed_windows(self):
         """Return current-timestep missed-window events (defensive copy).
@@ -90,6 +110,9 @@ class ApplianceAgent(Agent):
             )
         # Only clamp finite negative values
         power = max(0.0, power_float)
+
+        if self._has_desired_kw_override:
+            return self._desired_kw_override
         
         if not getattr(self, 'appliance_deferable', False):
             return power
