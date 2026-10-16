@@ -8,7 +8,7 @@ from .baseline_allocator import _require_valid_kw, allocate
 
 
 def hybrid_allocate(available_power_kw, bids, priorities) -> dict[str, float]:
-    """Serve priority 1-2 first, proportionally when critical power is short.
+    """Serve priority 1 before priority 2, then flexible bids.
 
     Flexible bids follow in descending urgency order. Urgencies within
     1e-9 of the highest urgency in a band tie; within each band, lower
@@ -23,7 +23,8 @@ def hybrid_allocate(available_power_kw, bids, priorities) -> dict[str, float]:
     """
     remaining = _require_valid_kw(available_power_kw, "available_power_kw")
     demands = {}
-    critical = []
+    priority_one = []
+    priority_two = []
     flexible = []
     for bid in bids:
         agent_id = bid["agent_id"]
@@ -37,14 +38,16 @@ def hybrid_allocate(available_power_kw, bids, priorities) -> dict[str, float]:
         priority = priorities.get(agent_id, 5)
         if isinstance(priority, bool) or not isinstance(priority, Integral) or not 1 <= priority <= 5:
             raise ValueError(f"priority for {agent_id!r} must be an integer from 1 through 5")
-        if priority <= 2:
-            critical.append(agent_id)
+        if priority == 1:
+            priority_one.append(agent_id)
+        elif priority == 2:
+            priority_two.append(agent_id)
         else:
             flexible.append((urgency, priority, agent_id))
 
     _require_valid_kw(sum(demands.values()), "total_demand")
     result = {agent_id: 0.0 for agent_id in sorted(demands)}
-    groups = [sorted(critical)]
+    groups = [sorted(priority_one), sorted(priority_two)]
     flexible.sort(key=lambda item: (-item[0], item[1], item[2]))
     index = 0
     while index < len(flexible):

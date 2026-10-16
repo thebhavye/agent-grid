@@ -258,8 +258,9 @@ bids, so invalid input fails loudly at the source.
 
 ## Phase 2 — Hybrid arbiter
 Decision: `hybrid_allocate(available_power_kw, bids, priorities)` serves
-priorities 1-2 together first, sharing proportionally to demand when solar
-is insufficient. Missing priorities default to 5. Flexible bids are sorted
+priority 1 first, then priority 2, sharing proportionally to demand within
+each priority when solar is insufficient. Missing priorities default to 5.
+Flexible bids are sorted
 by descending urgency, then lower priority number, then agent ID.
 Urgencies within 1e-9 of the highest urgency in a band are treated as tied;
 the fixed highest-value anchor prevents transitive chains of near-ties.
