@@ -434,6 +434,416 @@ def _outcome_metadata(twin, start, dt_min, states, blocked_before, drawn_before,
     }
 
 
+def _run_context(twin, allocator, steps, on_bad_reading="raise",
+                 max_hold_steps=_DEFAULT_MAX_HOLD_STEPS,
+                 sensor_faults=None, device_faults=None):
+    """Validate a run and construct independent model-facing agent state."""
+    if not getattr(twin, "_closed_loop", False):
+        raise ValueError("run_closed_loop requires a twin configured with closed_loop=True")
+    if twin.step_count != 0:
+        raise ValueError("run_closed_loop requires a fresh twin with step_count == 0")
+    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
+        raise ValueError("steps must be a non-negative integer")
+    if on_bad_reading not in _ON_BAD_READING_POLICIES:
+        raise ValueError(
+            f"on_bad_reading must be one of {_ON_BAD_READING_POLICIES}, "
+            f"got {on_bad_reading!r}"
+        )
+    if (
+        isinstance(max_hold_steps, bool)
+        or not isinstance(max_hold_steps, int)
+        or max_hold_steps < 0
+    ):
+        raise ValueError("max_hold_steps must be a non-negative integer")
+
+    agents = _build_closed_loop_agents(twin)
+    # A parallel, never-sanitized agent set tracks the clean observation so
+    # held sensor values can be bounded by what the real devices accept.
+    truth_agents = _build_closed_loop_agents(twin)
+    truth_battery = next(
+        agent for agent in truth_agents if isinstance(agent, BatteryAgent)
+    )
+    priorities = _build_priorities(twin)
+    battery = next(agent for agent in agents if isinstance(agent, BatteryAgent))
+    watch = _observation_watch_keys(agents)
+    sensor_injector = _coerce_sensor_injector(sensor_faults)
+    device_injector = _coerce_device_injector(device_faults)
+    sensor_enabled = sensor_injector is not None and sensor_injector.config.enabled
+    device_enabled = device_injector is not None and device_injector.config.enabled
+    fault_state = {"last_good": {}, "bad_counts": {}}
+    dt_min = float(twin._time_delta_min)
+
+    return {
+        "twin": twin,
+        "allocator": allocator,
+        "agents": agents,
+        "truth_agents": truth_agents,
+        "truth_battery": truth_battery,
+        "priorities": priorities,
+        "battery": battery,
+        "watch": watch,
+        "sensor_injector": sensor_injector,
+        "device_injector": device_injector,
+        "sensor_enabled": sensor_enabled,
+        "device_enabled": device_enabled,
+        "fault_state": fault_state,
+        "dt_min": dt_min,
+        "on_bad_reading": on_bad_reading,
+        "max_hold_steps": max_hold_steps,
+    }
+
+
+def _prepare_step(context, step):
+    """Observe truth and apply the existing run-local fault policy."""
+    twin = context["twin"]
+    sensor_injector = context["sensor_injector"]
+    device_injector = context["device_injector"]
+    watch = context["watch"]
+    on_bad_reading = context["on_bad_reading"]
+    max_hold_steps = context["max_hold_steps"]
+    fault_state = context["fault_state"]
+    start = twin.current_time
+    blocked_before = twin._appliances.blocked_starts
+    drawn_before = ({key: len(value) for key, value in
+                     twin._appliances.drawn_cycle_start_times.items()}
+                    if twin.step_count else {})
+    observation = twin.observe()
+    states = {
+        spec.appliance_id: dict(twin._appliances.get_appliance_state(spec.appliance_id))
+        for spec in twin._appliances.config.appliances
+        if spec.deferable and spec.appliance_id != "ev_charger"
+    }
+    # Display-rounded SOC must not create energy or cross reserve limits.
+    observation["battery_soc_pct"] = twin._battery.soc_pct
+    observation["ev_soc_pct"] = twin._ev.soc_pct
+    observation["solar_gen_kw"] = twin._pending_observation["solar_gen_kw"]
+
+    device_effects = {
+        "solar_scale": 1.0,
+        "ev_limit_kw": None,
+        "battery_factor": 1.0,
+    }
+    device_labels = []
+    if device_injector is not None:
+        device_effects, device_labels = device_injector.apply(step)
+    observation["solar_gen_kw"] = (
+        float(observation["solar_gen_kw"]) * device_effects["solar_scale"]
+    )
+
+    agent_observation = dict(observation)
+    sensor_labels = []
+    if sensor_injector is not None:
+        agent_observation, sensor_labels = sensor_injector.apply(
+            agent_observation, step
+        )
+    sanitized, substitutions, excluded = _sanitize_observation(
+        agent_observation, watch, on_bad_reading, max_hold_steps, fault_state
+    )
+
+    return {
+        "start": start,
+        "blocked_before": blocked_before,
+        "drawn_before": drawn_before,
+        "observation": observation,
+        "states": states,
+        "device_effects": device_effects,
+        "device_labels": device_labels,
+        "sanitized": sanitized,
+        "substitutions": substitutions,
+        "excluded": excluded,
+        "sensor_labels": sensor_labels,
+    }
+
+
+def _select_battery_mode(context, data, bids):
+    """Bound bids and select the existing battery mode, without allocating."""
+    twin = context["twin"]
+    battery = context["battery"]
+    truth_agents = context["truth_agents"]
+    truth_battery = context["truth_battery"]
+    dt_min = context["dt_min"]
+    observation = data["observation"]
+    excluded = data["excluded"]
+    device_effects = data["device_effects"]
+    bids.append({
+        "agent_id": "household_base_load",
+        "demand_kw": _require_finite_nonnegative(
+            twin._appliances.config.base_load_kw, "base_load_kw"
+        ),
+        "urgency": 1.0,
+    })
+    truth_bids = {
+        bid["agent_id"]: float(bid["demand_kw"])
+        for bid in _bids_for_observation(truth_agents, observation)
+    }
+    ev_config = twin._ev.config
+    ev_headroom_kw = (
+        (100.0 - twin._ev.soc_pct) / 100 * ev_config.battery_capacity_kwh
+        / ev_config.charge_efficiency / (dt_min / 60)
+    )
+    ev_cap_kw = max(0.0, ev_headroom_kw)
+    if device_effects["ev_limit_kw"] is not None:
+        ev_cap_kw = min(ev_cap_kw, device_effects["ev_limit_kw"])
+    for bid in bids:
+        agent_id = bid["agent_id"]
+        if agent_id in {"battery_1", "solar_1"}:
+            continue
+        # A held reading must not request more than the clean device
+        # accepts (an unplugged EV, or reduced appliance demand).
+        clean_demand = truth_bids.get(agent_id)
+        if clean_demand is not None:
+            bid["demand_kw"] = min(bid["demand_kw"], clean_demand)
+        if agent_id == "ev_1":
+            bid["demand_kw"] = min(bid["demand_kw"], ev_cap_kw)
+
+    battery_factor = device_effects["battery_factor"]
+    if "battery_1" in excluded:
+        battery_demand_kw = 0.0
+        battery_supply_kw = 0.0
+        charge_headroom_kw = 0.0
+    else:
+        battery_demand_kw = _require_finite_nonnegative(
+            battery.get_demand_kw(), "battery_demand_kw"
+        )
+        # A held SOC can overstate the energy above reserve or the free
+        # capacity, so bound physical delivery by the clean twin SOC
+        # before choosing the mode and allocating.
+        battery_supply_kw = min(
+            _require_finite_nonnegative(
+                battery.get_supply_kw(dt_min), "battery_supply_kw"
+            ),
+            _require_finite_nonnegative(
+                truth_battery.get_supply_kw(dt_min), "battery_supply_kw"
+            ),
+        )
+        charge_headroom_kw = min(
+            _require_finite_nonnegative(
+                battery.get_charge_headroom_kw(dt_min), "battery_headroom_kw"
+            ),
+            _require_finite_nonnegative(
+                truth_battery.get_charge_headroom_kw(dt_min),
+                "battery_headroom_kw",
+            ),
+        )
+    if battery_factor < 1.0:
+        battery_demand_kw = min(
+            battery_demand_kw, battery_factor * battery.limits.max_charge_kw
+        )
+        battery_supply_kw = min(
+            battery_supply_kw, battery_factor * battery.limits.max_discharge_kw
+        )
+        charge_headroom_kw = min(
+            charge_headroom_kw, battery_factor * battery.limits.max_charge_kw
+        )
+    other_demand_kw = sum(
+        float(bid["demand_kw"])
+        for bid in bids
+        if bid["agent_id"] != "battery_1"
+    )
+    mode = choose_battery_mode(
+        observation["solar_gen_kw"],
+        other_demand_kw,
+        battery_demand_kw,
+        battery_supply_kw,
+        charge_headroom_kw,
+    )
+
+    battery_id = "battery_1"
+    non_battery_bids = [bid for bid in bids if bid["agent_id"] != battery_id]
+    if mode["mode"] == "charge":
+        allocator_bids = non_battery_bids + [{
+            "agent_id": battery_id,
+            "demand_kw": mode["battery_demand_kw"],
+            "urgency": float(next(
+                bid["urgency"] for bid in bids if bid["agent_id"] == battery_id
+            )),
+        }]
+        available_kw = float(observation["solar_gen_kw"])
+    elif mode["mode"] == "discharge":
+        allocator_bids = non_battery_bids
+        available_kw = float(observation["solar_gen_kw"]) + mode["battery_supply_kw"]
+    else:
+        allocator_bids = non_battery_bids
+        available_kw = float(observation["solar_gen_kw"])
+
+    data.update({
+        "bids": bids,
+        "truth_bids": truth_bids,
+        "ev_config": ev_config,
+        "mode": mode,
+        "allocator_bids": allocator_bids,
+        "available_kw": available_kw,
+    })
+
+
+def _allocate_step(context, data):
+    """Allocate and prepare signed delivery using the unchanged accounting."""
+    allocator = context["allocator"]
+    priorities = context["priorities"]
+    allocator_bids = data["allocator_bids"]
+    bids = data["bids"]
+    mode = data["mode"]
+    available_kw = data["available_kw"]
+    observation = data["observation"]
+    battery_id = "battery_1"
+    allocations = allocator(available_kw, allocator_bids, priorities)
+    _validate_allocations(allocations, allocator_bids)
+    # Allocators omit the battery in discharge/idle mode by design. Keep
+    # the record complete by adding an explicit zero battery allocation.
+    allocations = {agent_id: float(value) for agent_id, value in allocations.items()}
+    if mode["mode"] != "charge":
+        allocations[battery_id] = 0.0
+    _validate_allocations(allocations, bids)
+
+    load_allocations = {
+        agent_id: value
+        for agent_id, value in allocations.items()
+        if agent_id not in {"solar_1", battery_id}
+    }
+    delivered_to_loads_kw = sum(load_allocations.values())
+    if mode["mode"] == "charge":
+        battery_kw = allocations[battery_id]
+    elif mode["mode"] == "discharge":
+        battery_kw = -(delivered_to_loads_kw - float(observation["solar_gen_kw"]))
+    else:
+        battery_kw = 0.0
+
+    curtailed_kw = max(
+        0.0,
+        float(observation["solar_gen_kw"])
+        + max(0.0, -battery_kw)
+        - delivered_to_loads_kw
+        - max(0.0, battery_kw),
+    )
+    if mode["mode"] == "discharge" and curtailed_kw > _EPSILON:
+        raise RuntimeError("discharge mode cannot curtail power")
+    _check_power_balance(
+        float(observation["solar_gen_kw"]),
+        battery_kw,
+        delivered_to_loads_kw,
+        curtailed_kw,
+    )
+
+    delivered = {"battery_1": battery_kw}
+    for agent_id, value in load_allocations.items():
+        if agent_id == "ev_1":
+            delivered[agent_id] = value
+        elif agent_id.startswith("appliance_"):
+            delivered[agent_id] = value
+    data.update({
+        "allocations": allocations,
+        "load_allocations": load_allocations,
+        "delivered_to_loads_kw": delivered_to_loads_kw,
+        "battery_kw": battery_kw,
+        "curtailed_kw": curtailed_kw,
+        "delivered": delivered,
+    })
+
+
+def _commit_step(context, data):
+    """Commit once, assert physical invariants, and capture the public record."""
+    twin = context["twin"]
+    dt_min = context["dt_min"]
+    battery = context["battery"]
+    priorities = context["priorities"]
+    sensor_enabled = context["sensor_enabled"]
+    device_enabled = context["device_enabled"]
+    observation = data["observation"]
+    delivered = data["delivered"]
+    allocations = data["allocations"]
+    delivered_to_loads_kw = data["delivered_to_loads_kw"]
+    curtailed_kw = data["curtailed_kw"]
+    battery_kw = data["battery_kw"]
+    ev_config = data["ev_config"]
+    bids = data["bids"]
+    excluded = data["excluded"]
+    truth_bids = data["truth_bids"]
+    mode = data["mode"]
+    available_kw = data["available_kw"]
+    sensor_labels = data["sensor_labels"]
+    substitutions = data["substitutions"]
+    device_labels = data["device_labels"]
+    start = data["start"]
+    states = data["states"]
+    blocked_before = data["blocked_before"]
+    drawn_before = data["drawn_before"]
+    committed = twin.commit(delivered)
+    actual_load_kw = (
+        allocations["household_base_load"]
+        + sum(committed["appliance_served_kw"].values())
+        + committed["ev_applied_kw"]
+    )
+    if abs(actual_load_kw - delivered_to_loads_kw) > _EPSILON:
+        raise RuntimeError("committed load power differs from allocation")
+    _check_power_balance(
+        observation["solar_gen_kw"], committed["battery_applied_kw"],
+        actual_load_kw, curtailed_kw,
+    )
+    dt_hours = dt_min / 60
+    battery_cfg = twin._battery.config
+    battery_delta_kwh = (
+        (twin._battery.soc_pct - observation["battery_soc_pct"])
+        / 100 * battery_cfg.capacity_kwh
+    )
+    expected_battery_delta = (
+        battery_kw * dt_hours * battery_cfg.charge_efficiency if battery_kw >= 0
+        else battery_kw * dt_hours / battery_cfg.discharge_efficiency
+    )
+    ev_delta_kwh = (
+        (twin._ev.soc_pct - observation["ev_soc_pct"])
+        / 100 * ev_config.battery_capacity_kwh
+    )
+    if (abs(battery_delta_kwh - expected_battery_delta) > _EPSILON
+            or abs(ev_delta_kwh - committed["ev_applied_kw"] * dt_hours
+                   * ev_config.charge_efficiency) > _EPSILON):
+        raise RuntimeError("committed SOC change violates energy accounting")
+    if (observation["battery_soc_pct"] >= battery.limits.reserve_pct
+            and twin._battery.soc_pct < battery.limits.reserve_pct - _EPSILON):
+        raise RuntimeError("battery discharge crossed reserve")
+    committed["battery_soc_pct"] = twin._battery.soc_pct
+    committed["ev_soc_pct"] = twin._ev.soc_pct
+
+    # Excluded agents bid zero so the allocator serves them nothing, but
+    # their true demand (from the clean observation) is still recorded so
+    # the unserved amount is visible rather than erased.
+    record_bids = [
+        {**bid, "demand_kw": truth_bids.get(bid["agent_id"], bid["demand_kw"])}
+        if bid["agent_id"] in excluded
+        else bid
+        for bid in bids
+    ]
+    record = _step_record(
+        observation,
+        dt_min,
+        mode["mode"],
+        available_kw,
+        record_bids,
+        allocations,
+        float(committed["battery_applied_kw"]),
+        curtailed_kw,
+        committed,
+    )
+    if sensor_enabled:
+        record["sensor_faults"] = sensor_labels
+        record["substitutions"] = substitutions
+        record["excluded_agents"] = sorted(excluded)
+        record["unserved_kw"] = {
+            bid["agent_id"]: max(
+                0.0,
+                float(bid["demand_kw"])
+                - float(allocations.get(bid["agent_id"], 0.0)),
+            )
+            for bid in record_bids
+        }
+    if device_enabled:
+        record["device_faults"] = device_labels
+    record.update(_outcome_metadata(
+        twin, start, dt_min, states, blocked_before, drawn_before,
+        priorities, battery.limits.reserve_pct, observation, committed,
+    ))
+    return record
+
+
 def run_closed_loop(
     twin,
     allocator: Allocator,
@@ -477,301 +887,15 @@ def run_closed_loop(
     feature is enabled, so a run without faults is byte-identical to one
     before this feature.
     """
-    if not getattr(twin, "_closed_loop", False):
-        raise ValueError("run_closed_loop requires a twin configured with closed_loop=True")
-    if twin.step_count != 0:
-        raise ValueError("run_closed_loop requires a fresh twin with step_count == 0")
-    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
-        raise ValueError("steps must be a non-negative integer")
-    if on_bad_reading not in _ON_BAD_READING_POLICIES:
-        raise ValueError(
-            f"on_bad_reading must be one of {_ON_BAD_READING_POLICIES}, "
-            f"got {on_bad_reading!r}"
-        )
-    if (
-        isinstance(max_hold_steps, bool)
-        or not isinstance(max_hold_steps, int)
-        or max_hold_steps < 0
-    ):
-        raise ValueError("max_hold_steps must be a non-negative integer")
-
-    agents = _build_closed_loop_agents(twin)
-    # A parallel, never-sanitized agent set tracks the clean observation so
-    # held sensor values can be bounded by what the real devices accept.
-    truth_agents = _build_closed_loop_agents(twin)
-    truth_battery = next(
-        agent for agent in truth_agents if isinstance(agent, BatteryAgent)
+    context = _run_context(
+        twin, allocator, steps, on_bad_reading, max_hold_steps,
+        sensor_faults, device_faults,
     )
-    priorities = _build_priorities(twin)
-    battery = next(agent for agent in agents if isinstance(agent, BatteryAgent))
-    watch = _observation_watch_keys(agents)
-    sensor_injector = _coerce_sensor_injector(sensor_faults)
-    device_injector = _coerce_device_injector(device_faults)
-    sensor_enabled = sensor_injector is not None and sensor_injector.config.enabled
-    device_enabled = device_injector is not None and device_injector.config.enabled
-    fault_state = {"last_good": {}, "bad_counts": {}}
-    dt_min = float(twin._time_delta_min)
     records = []
-
     for step in range(steps):
-        start = twin.current_time
-        blocked_before = twin._appliances.blocked_starts
-        drawn_before = ({key: len(value) for key, value in
-                         twin._appliances.drawn_cycle_start_times.items()}
-                        if twin.step_count else {})
-        observation = twin.observe()
-        states = {
-            spec.appliance_id: dict(twin._appliances.get_appliance_state(spec.appliance_id))
-            for spec in twin._appliances.config.appliances
-            if spec.deferable and spec.appliance_id != "ev_charger"
-        }
-        # Display-rounded SOC must not create energy or cross reserve limits.
-        observation["battery_soc_pct"] = twin._battery.soc_pct
-        observation["ev_soc_pct"] = twin._ev.soc_pct
-        observation["solar_gen_kw"] = twin._pending_observation["solar_gen_kw"]
-
-        device_effects = {
-            "solar_scale": 1.0,
-            "ev_limit_kw": None,
-            "battery_factor": 1.0,
-        }
-        device_labels = []
-        if device_injector is not None:
-            device_effects, device_labels = device_injector.apply(step)
-        observation["solar_gen_kw"] = (
-            float(observation["solar_gen_kw"]) * device_effects["solar_scale"]
-        )
-
-        agent_observation = dict(observation)
-        sensor_labels = []
-        if sensor_injector is not None:
-            agent_observation, sensor_labels = sensor_injector.apply(
-                agent_observation, step
-            )
-        sanitized, substitutions, excluded = _sanitize_observation(
-            agent_observation, watch, on_bad_reading, max_hold_steps, fault_state
-        )
-
-        bids = _bids_for_observation(agents, sanitized, excluded)
-        bids.append({
-            "agent_id": "household_base_load",
-            "demand_kw": _require_finite_nonnegative(
-                twin._appliances.config.base_load_kw, "base_load_kw"
-            ),
-            "urgency": 1.0,
-        })
-        truth_bids = {
-            bid["agent_id"]: float(bid["demand_kw"])
-            for bid in _bids_for_observation(truth_agents, observation)
-        }
-        ev_config = twin._ev.config
-        ev_headroom_kw = (
-            (100.0 - twin._ev.soc_pct) / 100 * ev_config.battery_capacity_kwh
-            / ev_config.charge_efficiency / (dt_min / 60)
-        )
-        ev_cap_kw = max(0.0, ev_headroom_kw)
-        if device_effects["ev_limit_kw"] is not None:
-            ev_cap_kw = min(ev_cap_kw, device_effects["ev_limit_kw"])
-        for bid in bids:
-            agent_id = bid["agent_id"]
-            if agent_id in {"battery_1", "solar_1"}:
-                continue
-            # A held reading must not request more than the clean device
-            # accepts (an unplugged EV, or reduced appliance demand).
-            clean_demand = truth_bids.get(agent_id)
-            if clean_demand is not None:
-                bid["demand_kw"] = min(bid["demand_kw"], clean_demand)
-            if agent_id == "ev_1":
-                bid["demand_kw"] = min(bid["demand_kw"], ev_cap_kw)
-
-        battery_factor = device_effects["battery_factor"]
-        if "battery_1" in excluded:
-            battery_demand_kw = 0.0
-            battery_supply_kw = 0.0
-            charge_headroom_kw = 0.0
-        else:
-            battery_demand_kw = _require_finite_nonnegative(
-                battery.get_demand_kw(), "battery_demand_kw"
-            )
-            # A held SOC can overstate the energy above reserve or the free
-            # capacity, so bound physical delivery by the clean twin SOC
-            # before choosing the mode and allocating.
-            battery_supply_kw = min(
-                _require_finite_nonnegative(
-                    battery.get_supply_kw(dt_min), "battery_supply_kw"
-                ),
-                _require_finite_nonnegative(
-                    truth_battery.get_supply_kw(dt_min), "battery_supply_kw"
-                ),
-            )
-            charge_headroom_kw = min(
-                _require_finite_nonnegative(
-                    battery.get_charge_headroom_kw(dt_min), "battery_headroom_kw"
-                ),
-                _require_finite_nonnegative(
-                    truth_battery.get_charge_headroom_kw(dt_min),
-                    "battery_headroom_kw",
-                ),
-            )
-        if battery_factor < 1.0:
-            battery_demand_kw = min(
-                battery_demand_kw, battery_factor * battery.limits.max_charge_kw
-            )
-            battery_supply_kw = min(
-                battery_supply_kw, battery_factor * battery.limits.max_discharge_kw
-            )
-            charge_headroom_kw = min(
-                charge_headroom_kw, battery_factor * battery.limits.max_charge_kw
-            )
-        other_demand_kw = sum(
-            float(bid["demand_kw"])
-            for bid in bids
-            if bid["agent_id"] != "battery_1"
-        )
-        mode = choose_battery_mode(
-            observation["solar_gen_kw"],
-            other_demand_kw,
-            battery_demand_kw,
-            battery_supply_kw,
-            charge_headroom_kw,
-        )
-
-        battery_id = "battery_1"
-        non_battery_bids = [bid for bid in bids if bid["agent_id"] != battery_id]
-        if mode["mode"] == "charge":
-            allocator_bids = non_battery_bids + [{
-                "agent_id": battery_id,
-                "demand_kw": mode["battery_demand_kw"],
-                "urgency": float(next(
-                    bid["urgency"] for bid in bids if bid["agent_id"] == battery_id
-                )),
-            }]
-            available_kw = float(observation["solar_gen_kw"])
-        elif mode["mode"] == "discharge":
-            allocator_bids = non_battery_bids
-            available_kw = float(observation["solar_gen_kw"]) + mode["battery_supply_kw"]
-        else:
-            allocator_bids = non_battery_bids
-            available_kw = float(observation["solar_gen_kw"])
-
-        allocations = allocator(available_kw, allocator_bids, priorities)
-        _validate_allocations(allocations, allocator_bids)
-        # Allocators omit the battery in discharge/idle mode by design. Keep
-        # the record complete by adding an explicit zero battery allocation.
-        allocations = {agent_id: float(value) for agent_id, value in allocations.items()}
-        if mode["mode"] != "charge":
-            allocations[battery_id] = 0.0
-        _validate_allocations(allocations, bids)
-
-        load_allocations = {
-            agent_id: value
-            for agent_id, value in allocations.items()
-            if agent_id not in {"solar_1", battery_id}
-        }
-        delivered_to_loads_kw = sum(load_allocations.values())
-        if mode["mode"] == "charge":
-            battery_kw = allocations[battery_id]
-        elif mode["mode"] == "discharge":
-            battery_kw = -(delivered_to_loads_kw - float(observation["solar_gen_kw"]))
-        else:
-            battery_kw = 0.0
-
-        curtailed_kw = max(
-            0.0,
-            float(observation["solar_gen_kw"])
-            + max(0.0, -battery_kw)
-            - delivered_to_loads_kw
-            - max(0.0, battery_kw),
-        )
-        if mode["mode"] == "discharge" and curtailed_kw > _EPSILON:
-            raise RuntimeError("discharge mode cannot curtail power")
-        _check_power_balance(
-            float(observation["solar_gen_kw"]),
-            battery_kw,
-            delivered_to_loads_kw,
-            curtailed_kw,
-        )
-
-        delivered = {"battery_1": battery_kw}
-        for agent_id, value in load_allocations.items():
-            if agent_id == "ev_1":
-                delivered[agent_id] = value
-            elif agent_id.startswith("appliance_"):
-                delivered[agent_id] = value
-        committed = twin.commit(delivered)
-        actual_load_kw = (
-            allocations["household_base_load"]
-            + sum(committed["appliance_served_kw"].values())
-            + committed["ev_applied_kw"]
-        )
-        if abs(actual_load_kw - delivered_to_loads_kw) > _EPSILON:
-            raise RuntimeError("committed load power differs from allocation")
-        _check_power_balance(
-            observation["solar_gen_kw"], committed["battery_applied_kw"],
-            actual_load_kw, curtailed_kw,
-        )
-        dt_hours = dt_min / 60
-        battery_cfg = twin._battery.config
-        battery_delta_kwh = (
-            (twin._battery.soc_pct - observation["battery_soc_pct"])
-            / 100 * battery_cfg.capacity_kwh
-        )
-        expected_battery_delta = (
-            battery_kw * dt_hours * battery_cfg.charge_efficiency if battery_kw >= 0
-            else battery_kw * dt_hours / battery_cfg.discharge_efficiency
-        )
-        ev_delta_kwh = (
-            (twin._ev.soc_pct - observation["ev_soc_pct"])
-            / 100 * ev_config.battery_capacity_kwh
-        )
-        if (abs(battery_delta_kwh - expected_battery_delta) > _EPSILON
-                or abs(ev_delta_kwh - committed["ev_applied_kw"] * dt_hours
-                       * ev_config.charge_efficiency) > _EPSILON):
-            raise RuntimeError("committed SOC change violates energy accounting")
-        if (observation["battery_soc_pct"] >= battery.limits.reserve_pct
-                and twin._battery.soc_pct < battery.limits.reserve_pct - _EPSILON):
-            raise RuntimeError("battery discharge crossed reserve")
-        committed["battery_soc_pct"] = twin._battery.soc_pct
-        committed["ev_soc_pct"] = twin._ev.soc_pct
-
-        # Excluded agents bid zero so the allocator serves them nothing, but
-        # their true demand (from the clean observation) is still recorded so
-        # the unserved amount is visible rather than erased.
-        record_bids = [
-            {**bid, "demand_kw": truth_bids.get(bid["agent_id"], bid["demand_kw"])}
-            if bid["agent_id"] in excluded
-            else bid
-            for bid in bids
-        ]
-        record = _step_record(
-            observation,
-            dt_min,
-            mode["mode"],
-            available_kw,
-            record_bids,
-            allocations,
-            float(committed["battery_applied_kw"]),
-            curtailed_kw,
-            committed,
-        )
-        if sensor_enabled:
-            record["sensor_faults"] = sensor_labels
-            record["substitutions"] = substitutions
-            record["excluded_agents"] = sorted(excluded)
-            record["unserved_kw"] = {
-                bid["agent_id"]: max(
-                    0.0,
-                    float(bid["demand_kw"])
-                    - float(allocations.get(bid["agent_id"], 0.0)),
-                )
-                for bid in record_bids
-            }
-        if device_enabled:
-            record["device_faults"] = device_labels
-        record.update(_outcome_metadata(
-            twin, start, dt_min, states, blocked_before, drawn_before,
-            priorities, battery.limits.reserve_pct, observation, committed,
-        ))
-        records.append(record)
-
+        data = _prepare_step(context, step)
+        bids = _bids_for_observation(context["agents"], data["sanitized"], data["excluded"])
+        _select_battery_mode(context, data, bids)
+        _allocate_step(context, data)
+        records.append(_commit_step(context, data))
     return records

@@ -542,3 +542,20 @@ discharge ceiling by `factor`. They are labelled in the step record under
 `device_faults`, deterministic by seed, and validated at configuration time.
 Both fault families default off; with them disabled the runner emits records
 identical to a run that never passed fault configuration.
+
+## Issue #65 - Deterministic LangGraph bidding orchestration
+
+Decision: compile a real StateGraph with one independent bid node per agent,
+a join before battery_mode, then arbiter and commit. Nodes exchange typed
+observation, bids, mode, available power, allocation, delivery and record state.
+Concurrent bids merge by agent ID; original agent order is restored before
+floating-point summation so thread completion order cannot change allocations.
+
+The existing runner's phases are extracted into shared private helpers, not
+duplicated or retuned. Both runners retain identical limits, fault policies,
+invariants, RNG behavior and record metadata. LangGraph 1.2.15 is pinned, imports
+are restricted to orchestration, and no LLM or remote checkpointer is used.
+Remote tracing is explicitly disabled even when enabled in the environment.
+Tests compare exact full-day records for both allocators, seeds 1/7/42 and all
+three built-in EV scenarios, plus graph topology, roster changes, reset and faults.
+This wraps the measured #57 trade-offs; it does not claim improved outcomes.
