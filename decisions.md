@@ -335,3 +335,19 @@ Physical limits and energy checks use unrounded SOC and solar power. EV
 service is recorded separately as `ev_applied_kw`, capped by physical charging
 headroom, and excluded from appliance totals to avoid counting it twice.
 Post-commit balance and SOC checks verify actual delivery, not just requests.
+
+## Issue #64 — Sensor-only fault injection and labelled export
+Decision: implement faults as a deterministic observation wrapper around clean
+twin or generator rows. The wrapper supports dropout, NaN, stuck, spike, and
+drift faults, with fixed half-open step windows or seeded probability/duration
+events. `generate_fault_dataset()` exports clean, observed, and per-key fault
+columns without changing the source rows or simulation physics.
+Why: Phase 6 needs repeatable labelled bad observations, while agents must keep
+their existing fail-fast validation behavior. Fault response policy and faults
+that alter device physics remain out of scope for this layer.
+
+Fault configurations canonicalize aliases and validate integer boundaries,
+durations and finite numeric parameters before use. Probability events extend
+as chronological observations arrive, without a fixed horizon; expired events
+are discarded. The first configured active fault wins on overlap. A stuck
+sensor without a prior good sample freezes its first available reading.
