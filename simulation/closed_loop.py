@@ -8,7 +8,10 @@ selected allocator, and commits the resulting delivery back into the twin.
 import math
 from typing import Callable
 
+from agents.appliance_agent import ApplianceAgent
 from agents.battery_agent import BatteryAgent, BatteryLimits
+from digital_twin.faults import DeviceFaultConfig, DeviceFaultInjector
+from digital_twin.faults import FaultConfig, FaultInjector
 from simulation.battery_mode import choose_battery_mode
 from simulation.run_simulation import (
     _build_agents,
@@ -21,6 +24,9 @@ from .baseline_allocator import allocate
 
 Allocator = Callable[[float, list[dict], dict[str, int]], dict[str, float]]
 _EPSILON = 1e-9
+_ON_BAD_READING_POLICIES = ("raise", "hold_last", "exclude")
+_DEFAULT_MAX_HOLD_STEPS = 3
+_MISSING = object()
 
 
 def proportional_adapter(
@@ -78,11 +84,131 @@ def _build_closed_loop_agents(twin):
     return agents
 
 
-def _bids_for_observation(agents, observation: dict) -> list[dict]:
-    """Update agents from an observation and return their bids."""
+def _coerce_sensor_injector(source):
+    """Normalize a sensor fault config/injector to a FaultInjector or None."""
+    if source is None:
+        return None
+    if isinstance(source, FaultInjector):
+        return source
+    return FaultInjector(source)
+
+
+def _coerce_device_injector(source):
+    """Normalize a device fault config/injector to a DeviceFaultInjector or None."""
+    if source is None:
+        return None
+    if isinstance(source, DeviceFaultInjector):
+        return source
+    return DeviceFaultInjector(source)
+
+
+def _observation_watch_keys(agents) -> dict[str, list[str]]:
+    """Map each observation key to the agents that read it.
+
+    Used to attribute a bad reading to the affected agent(s) so the runner
+    can sanitize the observation before ``update_state()`` without changing
+    the agents themselves.
+    """
+    appliance_agents = [
+        agent.agent_id for agent in agents if isinstance(agent, ApplianceAgent)
+    ]
+    return {
+        "solar_gen_kw": ["solar_1"],
+        "battery_soc_pct": ["battery_1"],
+        "ev_soc_pct": ["ev_1"],
+        "ev_departure_min": ["ev_1"],
+        "ev_plugged_in": ["ev_1"],
+        "timestamp": ["ev_1"] + appliance_agents,
+        "appliance_desired_kw": list(appliance_agents),
+    }
+
+
+def _is_bad_reading(value) -> bool:
+    """A reading is bad when missing, None, or non-finite numeric."""
+    if value is _MISSING or value is None:
+        return True
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return not math.isfinite(value)
+    if isinstance(value, (str, dict)):
+        return False
+    return True
+
+
+def _sanitize_observation(observation, watch, policy, max_hold_steps, state):
+    """Sanitize bad readings before they reach the agents.
+
+    Returns ``(sanitized, substitutions, excluded)``. ``state`` persists
+    the last good value per key and the consecutive bad-step count per
+    ``(agent_id, key)`` across the run. With the ``raise`` policy nothing
+    is changed, so agents keep their fail-fast behavior.
+    """
+    sanitized = dict(observation)
+    substitutions: list[dict] = []
+    excluded: set[str] = set()
+    if policy == "raise":
+        return sanitized, substitutions, excluded
+
+    last_good = state["last_good"]
+    bad_counts = state["bad_counts"]
+    for key, agent_ids in watch.items():
+        raw = observation.get(key, _MISSING)
+        if not _is_bad_reading(raw):
+            last_good[key] = raw
+            for agent_id in agent_ids:
+                bad_counts[(agent_id, key)] = 0
+            continue
+        for agent_id in agent_ids:
+            count = bad_counts.get((agent_id, key), 0) + 1
+            bad_counts[(agent_id, key)] = count
+            previous = last_good.get(key, _MISSING)
+            held = (
+                policy == "hold_last"
+                and previous is not _MISSING
+                and count <= max_hold_steps
+            )
+            if held:
+                sanitized[key] = previous
+                substitutions.append({
+                    "agent_id": agent_id,
+                    "key": key,
+                    "policy": "hold_last",
+                    "observed": raw,
+                    "used": previous,
+                })
+            else:
+                # Exclude the agent from this step's bidding. Keep the last
+                # good value (when one exists) so the runner's own physics
+                # and record stay finite.
+                excluded.add(agent_id)
+                if previous is not _MISSING:
+                    sanitized[key] = previous
+                substitutions.append({
+                    "agent_id": agent_id,
+                    "key": key,
+                    "policy": "exclude",
+                    "observed": None if raw is _MISSING else raw,
+                    "used": None if previous is _MISSING else previous,
+                })
+    return sanitized, substitutions, excluded
+
+
+def _bids_for_observation(agents, observation: dict, excluded=None) -> list[dict]:
+    """Update included agents from an observation and return their bids.
+
+    Excluded agents do not update state and bid zero so their demand goes
+    unserved for the step.
+    """
+    excluded = excluded or set()
+    bids = []
     for agent in agents:
+        if agent.agent_id in excluded:
+            bids.append({"agent_id": agent.agent_id, "demand_kw": 0.0, "urgency": 0.0})
+            continue
         agent.update_state(observation)
-    return [agent.get_bid() for agent in agents]
+        bids.append(agent.get_bid())
+    return bids
 
 
 def _validate_allocations(allocations: dict, bids: list[dict]) -> None:
@@ -192,6 +318,10 @@ def run_closed_loop(
     twin,
     allocator: Allocator,
     steps: int = 288,
+    on_bad_reading: str = "raise",
+    max_hold_steps: int = _DEFAULT_MAX_HOLD_STEPS,
+    sensor_faults=None,
+    device_faults=None,
 ) -> list[dict]:
     """Run an allocator against a fresh closed-loop digital twin.
 
@@ -199,6 +329,24 @@ def run_closed_loop(
     is selected, the allocator is called, and the resulting service is
     committed exactly once.  ``allocator`` can be ``hybrid_allocate`` or
     ``proportional_adapter`` (or another function with the same interface).
+
+    Once sensor faults are injected the runner keeps the agents fail-fast
+    but sanitizes the observation for them according to ``on_bad_reading``:
+
+    - ``"raise"`` (default): nothing is changed; a bad reading still raises,
+      reproducing the pre-fault behaviour exactly.
+    - ``"hold_last"``: a bad value is replaced with the agent's last good
+      observation for at most ``max_hold_steps`` consecutive bad steps, then
+      the agent falls back to ``"exclude"``.
+    - ``"exclude"``: the affected agent bids zero for that step, so its
+      demand goes unserved and is recorded.
+
+    ``sensor_faults`` and ``device_faults`` accept a config, an injector, or
+    ``None`` (feature off). Device faults (``inverter_trip``,
+    ``charger_fault``, ``battery_derate``) change delivered physics through
+    the commit path. Every substitution and active fault is added to the
+    step record only when the corresponding fault feature is enabled, so a
+    run without faults is byte-identical to one before this feature.
     """
     if not getattr(twin, "_closed_loop", False):
         raise ValueError("run_closed_loop requires a twin configured with closed_loop=True")
@@ -206,20 +354,60 @@ def run_closed_loop(
         raise ValueError("run_closed_loop requires a fresh twin with step_count == 0")
     if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
         raise ValueError("steps must be a non-negative integer")
+    if on_bad_reading not in _ON_BAD_READING_POLICIES:
+        raise ValueError(
+            f"on_bad_reading must be one of {_ON_BAD_READING_POLICIES}, "
+            f"got {on_bad_reading!r}"
+        )
+    if (
+        isinstance(max_hold_steps, bool)
+        or not isinstance(max_hold_steps, int)
+        or max_hold_steps < 0
+    ):
+        raise ValueError("max_hold_steps must be a non-negative integer")
 
     agents = _build_closed_loop_agents(twin)
     priorities = _build_priorities(twin)
     battery = next(agent for agent in agents if isinstance(agent, BatteryAgent))
+    watch = _observation_watch_keys(agents)
+    sensor_injector = _coerce_sensor_injector(sensor_faults)
+    device_injector = _coerce_device_injector(device_faults)
+    sensor_enabled = sensor_injector is not None and sensor_injector.config.enabled
+    device_enabled = device_injector is not None and device_injector.config.enabled
+    fault_state = {"last_good": {}, "bad_counts": {}}
     dt_min = float(twin._time_delta_min)
     records = []
 
-    for _ in range(steps):
+    for step in range(steps):
         observation = twin.observe()
         # Display-rounded SOC must not create energy or cross reserve limits.
         observation["battery_soc_pct"] = twin._battery.soc_pct
         observation["ev_soc_pct"] = twin._ev.soc_pct
         observation["solar_gen_kw"] = twin._pending_observation["solar_gen_kw"]
-        bids = _bids_for_observation(agents, observation)
+
+        device_effects = {
+            "solar_scale": 1.0,
+            "ev_limit_kw": None,
+            "battery_factor": 1.0,
+        }
+        device_labels = []
+        if device_injector is not None:
+            device_effects, device_labels = device_injector.apply(step)
+        observation["solar_gen_kw"] = (
+            float(observation["solar_gen_kw"]) * device_effects["solar_scale"]
+        )
+
+        agent_observation = dict(observation)
+        sensor_labels = []
+        if sensor_injector is not None:
+            agent_observation, sensor_labels = sensor_injector.apply(
+                agent_observation, step
+            )
+        sanitized, substitutions, excluded = _sanitize_observation(
+            agent_observation, watch, on_bad_reading, max_hold_steps, fault_state
+        )
+
+        bids = _bids_for_observation(agents, sanitized, excluded)
         bids.append({
             "agent_id": "household_base_load",
             "demand_kw": _require_finite_nonnegative(
@@ -232,19 +420,38 @@ def run_closed_loop(
             (100.0 - twin._ev.soc_pct) / 100 * ev_config.battery_capacity_kwh
             / ev_config.charge_efficiency / (dt_min / 60)
         )
+        ev_cap_kw = max(0.0, ev_headroom_kw)
+        if device_effects["ev_limit_kw"] is not None:
+            ev_cap_kw = min(ev_cap_kw, device_effects["ev_limit_kw"])
         for bid in bids:
             if bid["agent_id"] == "ev_1":
-                bid["demand_kw"] = min(bid["demand_kw"], max(0.0, ev_headroom_kw))
+                bid["demand_kw"] = min(bid["demand_kw"], ev_cap_kw)
 
-        battery_demand_kw = _require_finite_nonnegative(
-            battery.get_demand_kw(), "battery_demand_kw"
-        )
-        battery_supply_kw = _require_finite_nonnegative(
-            battery.get_supply_kw(dt_min), "battery_supply_kw"
-        )
-        charge_headroom_kw = _require_finite_nonnegative(
-            battery.get_charge_headroom_kw(dt_min), "battery_headroom_kw"
-        )
+        battery_factor = device_effects["battery_factor"]
+        if "battery_1" in excluded:
+            battery_demand_kw = 0.0
+            battery_supply_kw = 0.0
+            charge_headroom_kw = 0.0
+        else:
+            battery_demand_kw = _require_finite_nonnegative(
+                battery.get_demand_kw(), "battery_demand_kw"
+            )
+            battery_supply_kw = _require_finite_nonnegative(
+                battery.get_supply_kw(dt_min), "battery_supply_kw"
+            )
+            charge_headroom_kw = _require_finite_nonnegative(
+                battery.get_charge_headroom_kw(dt_min), "battery_headroom_kw"
+            )
+        if battery_factor < 1.0:
+            battery_demand_kw = min(
+                battery_demand_kw, battery_factor * battery.limits.max_charge_kw
+            )
+            battery_supply_kw = min(
+                battery_supply_kw, battery_factor * battery.limits.max_discharge_kw
+            )
+            charge_headroom_kw = min(
+                charge_headroom_kw, battery_factor * battery.limits.max_charge_kw
+            )
         other_demand_kw = sum(
             float(bid["demand_kw"])
             for bid in bids
@@ -356,7 +563,7 @@ def run_closed_loop(
         committed["battery_soc_pct"] = twin._battery.soc_pct
         committed["ev_soc_pct"] = twin._ev.soc_pct
 
-        records.append(_step_record(
+        record = _step_record(
             observation,
             dt_min,
             mode["mode"],
@@ -366,6 +573,13 @@ def run_closed_loop(
             float(committed["battery_applied_kw"]),
             curtailed_kw,
             committed,
-        ))
+        )
+        if sensor_enabled:
+            record["sensor_faults"] = sensor_labels
+            record["substitutions"] = substitutions
+            record["excluded_agents"] = sorted(excluded)
+        if device_enabled:
+            record["device_faults"] = device_labels
+        records.append(record)
 
     return records

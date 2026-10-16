@@ -7,6 +7,7 @@ import pytest
 from digital_twin.appliance_model import ApplianceModelConfig
 from digital_twin.battery_model import BatteryModelConfig
 from digital_twin.ev_model import EVModelConfig, EVScenario
+from digital_twin.faults import DeviceFaultConfig, FaultConfig
 from digital_twin.test_digital_twin import make_test_twin
 from simulation.baseline_allocator import allocate
 from simulation.closed_loop import proportional_adapter, run_closed_loop
@@ -14,6 +15,27 @@ from simulation.hybrid_arbiter import hybrid_allocate
 
 
 ALLOCATORS = [hybrid_allocate, proportional_adapter]
+
+
+def _assert_power_balance_and_exclusivity(records):
+    """Shared fault-run invariant check: balance + charge/discharge exclusivity."""
+    for record in records:
+        loads = sum(
+            value
+            for agent_id, value in record["allocated_kw"].items()
+            if agent_id not in {"solar_1", "battery_1"}
+        )
+        battery_kw = record["battery_kw"]
+        assert not (battery_kw > 1e-9 and battery_kw < -1e-9)
+        for values in record["agents"].values():
+            assert 0 <= values["allocated_kw"] <= values["demand_kw"] + 1e-12
+        assert record["solar_kw"] + max(0.0, -battery_kw) == pytest.approx(
+            loads + max(0.0, battery_kw) + record["curtailed_kw"],
+            abs=1e-9,
+        )
+        if record["mode"] == "discharge":
+            assert record["curtailed_kw"] == pytest.approx(0.0, abs=1e-9)
+
 
 
 @pytest.mark.parametrize("allocator", ALLOCATORS)
@@ -174,3 +196,184 @@ def test_closed_loop_requires_fresh_closed_loop_twin():
     twin.tick()
     with pytest.raises(ValueError, match="fresh"):
         run_closed_loop(twin, hybrid_allocate, steps=1)
+
+
+SENSOR_FAULTS = FaultConfig(enabled=True, seed=3, faults=[
+    {"type": "nan", "key": "battery_soc_pct", "start_step": 100, "end_step": 104},
+    {"type": "dropout", "key": "solar_gen_kw", "start_step": 200, "end_step": 202},
+    {"type": "spike", "key": "battery_soc_pct", "start_step": 300, "end_step": 302,
+     "offset": 30},
+])
+
+
+def test_raise_policy_keeps_agents_fail_fast_on_nan_soc():
+    config = FaultConfig(enabled=True, faults=[
+        {"type": "nan", "key": "battery_soc_pct", "start_step": 0, "end_step": 1},
+    ])
+    with pytest.raises(ValueError, match="battery_soc_pct"):
+        run_closed_loop(
+            make_test_twin(closed_loop=True), hybrid_allocate, steps=1,
+            sensor_faults=config,
+        )
+
+
+def test_invalid_fault_policy_and_hold_bound_are_rejected():
+    twin = make_test_twin(closed_loop=True)
+    with pytest.raises(ValueError, match="on_bad_reading"):
+        run_closed_loop(twin, hybrid_allocate, steps=0, on_bad_reading="ignore")
+    with pytest.raises(ValueError, match="max_hold_steps"):
+        run_closed_loop(
+            make_test_twin(closed_loop=True), hybrid_allocate, steps=0,
+            on_bad_reading="hold_last", max_hold_steps=-1,
+        )
+
+
+def test_hold_last_completes_full_run_and_logs_every_substitution():
+    twin = make_test_twin(closed_loop=True)
+    records = run_closed_loop(
+        twin, hybrid_allocate, on_bad_reading="hold_last", sensor_faults=SENSOR_FAULTS
+    )
+
+    assert len(records) == 288
+    assert twin.step_count == 288
+    _assert_power_balance_and_exclusivity(records)
+
+    substitutions = [entry for record in records for entry in record["substitutions"]]
+    assert substitutions
+    for entry in substitutions:
+        assert set(entry) == {"agent_id", "key", "policy", "observed", "used"}
+        assert entry["policy"] in {"hold_last", "exclude"}
+    logged = {(entry["agent_id"], entry["key"], entry["policy"]) for entry in substitutions}
+    assert ("battery_1", "battery_soc_pct", "hold_last") in logged
+    assert ("solar_1", "solar_gen_kw", "hold_last") in logged
+    # The finite spike is a labelled sensor fault but not a runner substitution.
+    assert any(record["sensor_faults"] for record in records)
+
+
+def test_exclude_policy_zeroes_the_affected_agent_bid():
+    config = FaultConfig(enabled=True, faults=[
+        {"type": "nan", "key": "battery_soc_pct", "start_step": 10, "end_step": 14},
+    ])
+    twin = make_test_twin(closed_loop=True)
+    records = run_closed_loop(
+        twin, hybrid_allocate, on_bad_reading="exclude", sensor_faults=config
+    )
+    _assert_power_balance_and_exclusivity(records)
+
+    faulted = records[10]
+    assert faulted["demand_kw"]["battery_1"] == 0.0
+    assert faulted["excluded_agents"] == ["battery_1"]
+    assert any(
+        entry["policy"] == "exclude" and entry["agent_id"] == "battery_1"
+        for entry in faulted["substitutions"]
+    )
+    assert records[9]["excluded_agents"] == []
+
+
+def test_hold_last_falls_back_to_exclude_after_max_steps():
+    config = FaultConfig(enabled=True, faults=[
+        {"type": "nan", "key": "battery_soc_pct", "start_step": 10, "end_step": 20},
+    ])
+    twin = make_test_twin(closed_loop=True)
+    records = run_closed_loop(
+        twin, hybrid_allocate, on_bad_reading="hold_last", max_hold_steps=2,
+        sensor_faults=config,
+    )
+
+    def battery_policies(index):
+        return [
+            entry["policy"] for entry in records[index]["substitutions"]
+            if entry["agent_id"] == "battery_1"
+        ]
+
+    assert battery_policies(10) == ["hold_last"]
+    assert battery_policies(11) == ["hold_last"]
+    assert battery_policies(12) == ["exclude"]
+    assert records[12]["excluded_agents"] == ["battery_1"]
+
+
+def test_fault_features_off_leave_records_identical():
+    plain = run_closed_loop(make_test_twin(closed_loop=True), hybrid_allocate)
+    disabled = run_closed_loop(
+        make_test_twin(closed_loop=True), hybrid_allocate,
+        sensor_faults=FaultConfig(), device_faults=DeviceFaultConfig(),
+    )
+    assert plain == disabled
+
+
+def test_inverter_trip_zeroes_delivered_solar_and_battery_covers_load():
+    config = DeviceFaultConfig(enabled=True, faults=[
+        {"type": "inverter_trip", "start_step": 144, "end_step": 150},
+    ])
+    baseline = run_closed_loop(make_test_twin(closed_loop=True), hybrid_allocate)
+    faulted = run_closed_loop(
+        make_test_twin(closed_loop=True), hybrid_allocate, device_faults=config
+    )
+    _assert_power_balance_and_exclusivity(faulted)
+
+    assert baseline[144]["solar_kw"] > 0
+    trip = faulted[144]
+    assert trip["solar_kw"] == 0.0
+    assert trip["mode"] == "discharge"
+    assert trip["battery_kw"] < 0
+    assert {"step": 144, "device": "solar", "fault_type": "inverter_trip"} in (
+        trip["device_faults"]
+    )
+    assert faulted[150]["device_faults"] == []
+
+
+def test_charger_fault_zeroes_ev_delivery_while_plugged():
+    baseline = run_closed_loop(make_test_twin(closed_loop=True), hybrid_allocate)
+    target = next(
+        index for index, record in enumerate(baseline)
+        if record["ev_plugged_in"] and record["ev_applied_kw"] > 0
+    )
+    config = DeviceFaultConfig(enabled=True, faults=[
+        {"type": "charger_fault", "start_step": target, "end_step": target + 1},
+    ])
+    faulted = run_closed_loop(
+        make_test_twin(closed_loop=True), hybrid_allocate, device_faults=config
+    )
+
+    assert faulted[target]["ev_plugged_in"] is True
+    assert faulted[target]["ev_applied_kw"] == 0.0
+    assert {"step": target, "device": "ev", "fault_type": "charger_fault"} in (
+        faulted[target]["device_faults"]
+    )
+
+
+def test_battery_derate_caps_charge_and_discharge_power():
+    baseline = run_closed_loop(make_test_twin(closed_loop=True), hybrid_allocate)
+    target = next(
+        index for index, record in enumerate(baseline)
+        if record["mode"] == "discharge" and abs(record["battery_kw"]) > 1.5
+    )
+    config = DeviceFaultConfig(enabled=True, faults=[
+        {"type": "battery_derate", "start_step": target, "end_step": target + 1,
+         "factor": 0.1},
+    ])
+    faulted = run_closed_loop(
+        make_test_twin(closed_loop=True), hybrid_allocate, device_faults=config
+    )
+    _assert_power_balance_and_exclusivity(faulted)
+
+    derated = faulted[target]
+    assert derated["mode"] == "discharge"
+    assert derated["battery_kw"] == pytest.approx(-1.2, abs=1e-9)  # 0.1 * 12 kW
+    assert abs(derated["battery_kw"]) < abs(baseline[target]["battery_kw"])
+    assert derated["device_faults"][0]["fault_type"] == "battery_derate"
+
+
+def test_device_faults_are_deterministic():
+    faults = [
+        {"type": "inverter_trip", "start_step": 144, "end_step": 150},
+        {"type": "battery_derate", "start_step": 10, "end_step": 15, "factor": 0.1},
+    ]
+
+    def run():
+        return run_closed_loop(
+            make_test_twin(closed_loop=True), hybrid_allocate,
+            device_faults=DeviceFaultConfig(enabled=True, faults=faults),
+        )
+
+    assert run() == run()

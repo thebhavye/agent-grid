@@ -14,7 +14,13 @@ from digital_twin.solar_model import SolarModel, SolarModelConfig
 from digital_twin.battery_model import BatteryModel, BatteryModelConfig
 from digital_twin.ev_model import EVModel, EVModelConfig, EVScenario
 from digital_twin.appliance_model import ApplianceModel, ApplianceModelConfig
-from digital_twin.faults import FaultConfig, FaultInjector, generate_fault_dataset
+from digital_twin.faults import (
+    DeviceFaultConfig,
+    DeviceFaultInjector,
+    FaultConfig,
+    FaultInjector,
+    generate_fault_dataset,
+)
 
 __all__ = [
     "DigitalTwin",
@@ -31,5 +37,7 @@ __all__ = [
     "ApplianceModelConfig",
     "FaultConfig",
     "FaultInjector",
+    "DeviceFaultConfig",
+    "DeviceFaultInjector",
     "generate_fault_dataset",
 ]

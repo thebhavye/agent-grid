@@ -4,7 +4,13 @@ import pandas as pd
 import pytest
 
 from agents.battery_agent import BatteryAgent
-from digital_twin.faults import FaultConfig, FaultInjector, generate_fault_dataset
+from digital_twin.faults import (
+    DeviceFaultConfig,
+    DeviceFaultInjector,
+    FaultConfig,
+    FaultInjector,
+    generate_fault_dataset,
+)
 
 
 def test_fault_type_alias_is_canonicalized():
@@ -194,3 +200,75 @@ def test_dataset_columns_probability_and_csv(tmp_path):
                                     "battery_soc_pct_observed", "battery_soc_pct_fault"]
     assert set(result["battery_soc_pct_fault"]) == {"spike"}
     assert pd.read_csv(path).equals(result)
+
+
+def test_device_faults_disabled_are_neutral_and_pass_through():
+    injector = DeviceFaultInjector(DeviceFaultConfig())
+    effects, labels = injector.apply(0)
+    assert effects == {"solar_scale": 1.0, "ev_limit_kw": None, "battery_factor": 1.0}
+    assert labels == []
+
+
+def test_device_fault_effects_are_windowed_labelled_and_deterministic():
+    faults = [
+        {"type": "inverter_trip", "start_step": 0, "end_step": 2},
+        {"type": "battery_derate", "start_step": 1, "end_step": 3, "factor": 0.25},
+        {"type": "charger_fault", "start_step": 2, "end_step": 4},
+    ]
+
+    def run():
+        injector = DeviceFaultInjector(DeviceFaultConfig(enabled=True, faults=faults))
+        return [injector.apply(step) for step in range(5)]
+
+    first, second = run(), run()
+    assert first == second
+
+    assert first[0][0] == {"solar_scale": 0.0, "ev_limit_kw": None,
+                           "battery_factor": 1.0}
+    assert first[1][0] == {"solar_scale": 0.0, "ev_limit_kw": None,
+                           "battery_factor": 0.25}
+    assert first[2][0] == {"solar_scale": 1.0, "ev_limit_kw": 0.0,
+                           "battery_factor": 0.25}
+    assert first[3][0] == {"solar_scale": 1.0, "ev_limit_kw": 0.0,
+                           "battery_factor": 1.0}
+    assert first[4][0] == {"solar_scale": 1.0, "ev_limit_kw": None,
+                           "battery_factor": 1.0}
+    assert [label["fault_type"] for label in first[2][1]] == ["battery_derate",
+                                                              "charger_fault"]
+    assert first[2][1][0]["factor"] == 0.25
+
+
+def test_device_fault_overlapping_derate_uses_the_strongest_factor():
+    injector = DeviceFaultInjector(DeviceFaultConfig(enabled=True, faults=[
+        {"type": "battery_derate", "start_step": 0, "end_step": 1, "factor": 0.8},
+        {"type": "battery_derate", "start_step": 0, "end_step": 1, "factor": 0.3},
+    ]))
+    effects, labels = injector.apply(0)
+    assert effects["battery_factor"] == 0.3
+    assert len(labels) == 2
+
+
+@pytest.mark.parametrize("spec", [
+    {"type": "not_a_device_fault", "start_step": 0, "end_step": 1},
+    {"type": "battery_derate", "start_step": 0, "end_step": 1, "factor": 0},
+    {"type": "battery_derate", "start_step": 0, "end_step": 1, "factor": 1.5},
+    {"type": "inverter_trip"},
+    {"type": "inverter_trip", "start_step": 0, "end_step": 1, "probability": 0.5},
+])
+def test_invalid_device_fault_parameters_fail_at_configuration(spec):
+    with pytest.raises(ValueError):
+        DeviceFaultConfig(enabled=True, faults=[spec])
+
+
+def test_device_fault_probability_is_seeded_and_chronological():
+    config = DeviceFaultConfig(enabled=True, seed=7, faults=[
+        {"type": "charger_fault", "probability": 0.5, "duration_range": (1, 2)},
+    ])
+    a = DeviceFaultInjector(config)
+    b = DeviceFaultInjector(config)
+    assert [a.apply(step) for step in range(10)] == [b.apply(step) for step in range(10)]
+
+    injector = DeviceFaultInjector(config)
+    injector.apply(1)
+    with pytest.raises(ValueError, match="chronological"):
+        injector.apply(0)

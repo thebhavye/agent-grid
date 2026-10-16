@@ -384,3 +384,40 @@ Critical reasons follow the separate priority-1 and priority-2 pools: a
 priority-2 singleton limited by earlier priority-1 service reports
 critical_first. Actual priority-2 peers still report proportional sharing
 within their own pool; no sharing across critical priorities is implied.
+
+## Issue #68 — Runner fault-handling policy and device faults
+Decision: the closed-loop runner owns a configurable
+`on_bad_reading` policy with values `"raise"` (default), `"hold_last"`, and
+`"exclude"`. Agents stay untouched and keep their own fail-fast validation;
+the runner sanitizes observations before calling `update_state`. A bad reading
+is a missing key, a NaN/inf value, or a malformed sensor payload. `raise`
+preserves today's behavior exactly: the offending agent raises, and the
+simulation stops, so a hidden fault can never masquerade as a good step.
+
+Why agents keep fail-fast behavior: the runner is the only layer that knows
+whether a run wants to survive sensor noise or halt on it. Moving the policy
+into the agents would silently weaken the sensor contracts used elsewhere
+(tests, dataset generation, standalone agent use). Keeping the decision at the
+runner boundary lets `"raise"` remain the unambiguous default for development
+and CI, while exploratory or resilient runs opt in explicitly.
+
+Under `hold_last`, a substituted agent reuses its last good value for each
+affected key until the fault clears, but only for `max_hold_steps` consecutive
+steps (default 3); after that bound the agent is excluded for that step. Under
+`exclude`, an affected agent bids zero for that step, its demand is recorded as
+unserved, and it is listed in `excluded_agents`. Every substitution is logged in
+the step record as `{agent_id, key, policy, observed, used}`, so exports and
+tests can audit exactly what was replaced and why. Truth observations still
+drive physics, allocation, records, and accounting, so injected bad agent
+readings cannot break the power-balance or charge/discharge-exclusivity
+invariants.
+
+Device faults extend the #64 injector in `digital_twin/faults.py` and are
+applied through the twin `commit()` path so they change physics rather than
+just observations: `inverter_trip` delivers zero solar for its window while
+irradiance is unchanged, `charger_fault` caps an EV to zero accepted power
+while plugged in, and `battery_derate` scales the battery's charge and
+discharge ceiling by `factor`. They are labelled in the step record under
+`device_faults`, deterministic by seed, and validated at configuration time.
+Both fault families default off; with them disabled the runner emits records
+identical to a run that never passed fault configuration.
