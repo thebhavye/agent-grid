@@ -430,3 +430,23 @@ The custom scenario sentinel is deliberately a string rather than an extra
 random-selectable enum member. Consumers must not assume .value is available
 for custom schedules. EVSegment's former start_min/end_min constructor keyword
 names are not supported; positional construction and read-only aliases remain.
+
+## Issue #63 — Saved offline weather and stress scenarios
+Decision: provide seven named scenarios through CATALOG, list_scenarios()
+and build_twin(name, closed_loop=False), using existing twin configuration
+APIs. Each build creates fresh models and an offline WeatherClient session
+reading a saved JSON payload, with an instance-local cache independent of
+live weather requests. No twin physics, EV model or runner behavior changes.
+
+Saved Vellore profiles come from Open-Meteo's historical archive for
+2024-01-25 (sunny midday), 2023-12-04 (overcast monsoon) and 2024-05-01
+(hot pre-monsoon). They are historical reanalysis, not station measurements;
+hourly values are unchanged, and request URLs, retrieval date, units and
+CC BY attribution are retained. No synthetic fallback data was needed.
+
+The low-battery scenario starts at 20% SOC. Reduced capacity (6 versus
+12 kWh) is an explicitly assumed degradation proxy, not a health/aging
+model. Three-day runs use 864 five-minute steps and repeat one saved weather
+day, rather than implying varying multi-day historical weather. The hot-day
+test isolates derating using identical irradiance at 25 C ambient as a
+counterfactual control. Explicit late-EV-arrival segments remain issue #67.
