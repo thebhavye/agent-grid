@@ -163,3 +163,9 @@ def test_agent_labels():
     assert data.agent_label("appliance_pool_pump") == "Pool pump"
     assert data.agent_label("ev_1") == "EV"
     assert data.agent_label("household_base_load") == "Base load"
+
+
+def test_demo_scenario_notes_describe_the_explicit_array_sizing():
+    assert "demo_sunny_home" in list_scenarios()
+    assert "60 m2" in data.SCENARIO_NOTES["demo_sunny_home"]
+    assert "12 kWp" in data.SCENARIO_NOTES["demo_sunny_home"]

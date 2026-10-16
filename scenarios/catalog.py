@@ -8,6 +8,7 @@ from pathlib import Path
 from digital_twin.appliance_model import ApplianceModelConfig
 from digital_twin.battery_model import BatteryModelConfig
 from digital_twin.ev_model import EVModelConfig, EVScenario
+from digital_twin.solar_model import SolarModelConfig
 from digital_twin.twin import DigitalTwin, DigitalTwinConfig
 from digital_twin.weather_client import WeatherClient
 
@@ -26,6 +27,7 @@ _BASE = {
 }
 CATALOG = {
     "clear_day": dict(_BASE),
+    "demo_sunny_home": {**_BASE, "panel_area_m2": 60.0},
     "monsoon_cloudy": {
         **_BASE, "weather_file": "vellore_2023-12-04.json", "start_date": "2023-12-04",
     },
@@ -100,6 +102,7 @@ def build_twin(name, closed_loop=False) -> DigitalTwin:
         start_datetime=start,
         weather_date_override=start,
         weather_client=_OfflineWeatherClient(_WEATHER_DIR / scenario["weather_file"]),
+        solar_config=SolarModelConfig(panel_area_m2=scenario.get("panel_area_m2", 20.0)),
         ev_config=EVModelConfig(scenario=scenario["ev_scenario"], seed=scenario["ev_seed"]),
         appliance_config=ApplianceModelConfig(seed=scenario["appliance_seed"]),
         battery_config=BatteryModelConfig(
