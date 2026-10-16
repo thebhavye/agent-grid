@@ -18,7 +18,7 @@ and usual windows, with some stochastic variation.
 
 import hashlib
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -123,7 +123,6 @@ class ApplianceModel:
             self._appliance_states[spec.appliance_id] = {
                 "is_on": not spec.deferable,  # Essentials start on
                 "time_remaining_min": 0.0,
-                "next_cycle_start": None,
             }
 
         self._current_minute = 0

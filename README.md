@@ -22,6 +22,8 @@ This repository is private pending a planned patent filing.
 
 From the repository root (CI uses Python 3.13):
 
+Dependencies are pinned in `requirements.txt`; bump pins from a fresh Python 3.13 environment's `pip freeze` and rerun the offline suite and `ruff check .`.
+
 ```bash
 python -m pip install -r requirements.txt
 python -m pytest . -m "not live"
@@ -131,6 +133,33 @@ The returned DataFrame has one row per input step and these columns:
 
 The optional `output_path` writes the same columns to CSV. With `enabled=False`,
 `FaultInjector.apply()` is an exact observation pass-through and emits no labels.
+
+## Offline Scenarios
+
+The [scenario library](scenarios/README.md) provides reproducible twins using
+saved Vellore archive weather. No credentials or network access are needed.
+
+| Scenario | Historical weather date | Purpose |
+| --- | --- | --- |
+| `clear_day` | 2024-01-25 | Sunny-midday baseline |
+| `monsoon_cloudy` | 2023-12-04 | Low, variable solar |
+| `heatwave` | 2024-05-01 | Hot-day panel derating |
+| `low_battery_start` | 2024-01-25 | Initial SOC at 20% reserve |
+| `degraded_battery` | 2024-01-25 | Reduced capacity: 6 kWh |
+| `overnight_ev_cloudy` | 2023-12-04 | Overnight EV on a cloudy day |
+| `three_days` | 2024-01-25 repeated | 864 five-minute steps |
+
+```python
+from scenarios import CATALOG, build_twin, list_scenarios
+
+twin = build_twin("three_days")
+rows = twin.run_full_day(steps=CATALOG["three_days"]["steps"])
+```
+
+The weather comes from [Open-Meteo historical reanalysis](https://open-meteo.com/en/docs/historical-weather-api),
+not station measurements or synthetic curves. Source URLs and attribution
+are recorded with the saved files. `three_days` repeats one weather day;
+late-EV-arrival support awaits explicit EV segments (#67).
 
 ## Digital Twin (implemented, standalone)
 

@@ -22,7 +22,7 @@ Energy conservation: The model never creates energy from nowhere.
 SOC is clamped to [0, 100].
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 

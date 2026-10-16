@@ -19,10 +19,12 @@ Scenarios (matching generate_dataset.py):
 Charging: linear ramp to target SOC over plugged-in period (80% of duration).
 """
 
+import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
+from numbers import Real
 from typing import Optional
 
 
@@ -35,11 +37,29 @@ class EVScenario(str, Enum):
 
 @dataclass
 class EVSegment:
-    """A single plugged-in charging segment."""
-    start_min: float      # Minute of day when plugging in
-    end_min: float        # Minute of day when unplugging (departure)
+    """A half-open charging interval within one day.
+
+    Represent 23:30 -> 06:00 with sorted intervals [0, 360) and [1410, 1440),
+    as in the built-in overnight scenario. A continuous midnight connection
+    does not reset SOC. The two intervals describe one overnight connection.
+
+    Constructor keywords are plug_in_min/departure_min. The former
+    start_min/end_min names remain read-only aliases, not constructor keywords.
+    """
+    plug_in_min: float
+    departure_min: float
     start_soc: float      # SOC at plug-in
     target_soc: float     # Target SOC at departure
+
+    @property
+    def start_min(self) -> float:
+        """Existing model name for the plug-in minute."""
+        return self.plug_in_min
+
+    @property
+    def end_min(self) -> float:
+        """Existing model name for the departure minute."""
+        return self.departure_min
 
 
 @dataclass
@@ -53,12 +73,15 @@ class EVModelConfig:
         battery_capacity_kwh: EV battery capacity (kWh). Default 60 kWh.
         max_charge_kw: Maximum charge power (kW). Default 7.0 kW.
         charge_efficiency: Charging efficiency (0-1). Default 0.90.
+        segments: Sorted, non-overlapping day intervals, or None to retain
+            random scenario generation. Custom intervals override scenario.
     """
     scenario: Optional[EVScenario] = None
     seed: Optional[int] = 42
     battery_capacity_kwh: float = 60.0
     max_charge_kw: float = 7.0
     charge_efficiency: float = 0.90
+    segments: Optional[list[EVSegment]] = None
 
     def __post_init__(self):
         if self.battery_capacity_kwh <= 0:
@@ -67,6 +90,25 @@ class EVModelConfig:
             raise ValueError("max_charge_kw must be positive")
         if not 0 < self.charge_efficiency <= 1:
             raise ValueError("charge_efficiency must be in (0, 1]")
+        if self.segments is not None:
+            if not isinstance(self.segments, list) or not self.segments:
+                raise ValueError("segments must be a non-empty list of EVSegment values")
+            previous_end = 0.0
+            for index, segment in enumerate(self.segments):
+                if not isinstance(segment, EVSegment):
+                    raise ValueError(f"segments[{index}] must be an EVSegment")
+                for name in ("plug_in_min", "departure_min", "start_soc", "target_soc"):
+                    value = getattr(segment, name)
+                    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
+                        raise ValueError(f"segments[{index}].{name} must be a finite number")
+                if not 0 <= segment.plug_in_min < segment.departure_min <= 1440:
+                    raise ValueError(f"segments[{index}] requires 0 <= plug_in_min < departure_min <= 1440")
+                if segment.plug_in_min < previous_end:
+                    raise ValueError("segments must be sorted and non-overlapping")
+                if not (0 <= segment.start_soc <= 100 and 0 <= segment.target_soc <= 100):
+                    raise ValueError(f"segments[{index}] SOC must be in [0, 100]")
+                previous_end = segment.departure_min
+            self.segments = [replace(segment) for segment in self.segments]
 
 
 class EVModel:
@@ -82,13 +124,18 @@ class EVModel:
         self._rng = random.Random(self.config.seed)
 
         # Initialize scenario
-        if self.config.scenario is None:
+        if self.config.segments is not None:
+            self._scenario = "custom"
+        elif self.config.scenario is None:
             self._scenario = self._rng.choice(list(EVScenario))
         else:
             self._scenario = self.config.scenario
 
         # Generate segments for this scenario
-        self._segments = self._generate_segments()
+        self._segments = (
+            [replace(segment) for segment in self.config.segments]
+            if self.config.segments is not None else self._generate_segments()
+        )
         self._departure_min = self._calculate_departure_min()
 
         # State
@@ -101,7 +148,8 @@ class EVModel:
 
     def _generate_segments(self) -> list[EVSegment]:
         """Generate charging segments based on scenario (matching generate_dataset.py logic)."""
-        snap = lambda m: float(round(m / 5) * 5)  # Snap to 5-min grid
+        def snap(m):
+            return float(round(m / 5) * 5)  # Snap to 5-min grid
 
         if self._scenario == EVScenario.OVERNIGHT:
             departure_min = snap(self._rng.uniform(6 * 60 + 30, 8 * 60 + 30))
@@ -191,11 +239,36 @@ class EVModel:
         self._soc_pct = self._calculate_soc_at_minute(self._current_minute)
 
     def _advance_schedule(self, time_delta_min: float) -> None:
-        """Advance the exogenous clock and resolve plug-in transitions."""
+        """Advance the clock and reset SOC only after an actual unplugged gap.
+
+        Custom schedules inspect the traversed segment boundaries because both
+        sampled endpoints may be plugged in despite an intervening departure.
+        Adjacent intervals, including midnight continuity, do not reset SOC.
+        Clock/index alignment distinguishes initial twin sampling from a wrap;
+        random scenarios retain the original endpoint-transition behavior.
+        """
+        previous_minute = self._current_minute % 1440
+        previous_segment = self._active_segment_idx
         self._current_minute = (self._current_minute + time_delta_min) % 1440
         prev_plugged = self._plugged_in
         self._update_plugged_state(self._current_minute)
-        if self._plugged_in and not prev_plugged:
+        crossed_gap = False
+        if self.config.segments is not None and prev_plugged and self._plugged_in:
+            # Endpoint plug states can hide an entire unplugged gap. Adjacent
+            # segments, including a continuous midnight connection, have none.
+            count = len(self._segments)
+            transitions = (self._active_segment_idx - previous_segment) % count
+            if (self._find_active_segment(previous_minute) == previous_segment
+                    and (time_delta_min >= 1440 or (
+                        not transitions and self._current_minute < previous_minute))):
+                transitions = count
+            for offset in range(transitions):
+                before = self._segments[(previous_segment + offset) % count]
+                after = self._segments[(previous_segment + offset + 1) % count]
+                if before.end_min % 1440 != after.start_min:
+                    crossed_gap = True
+                    break
+        if self._plugged_in and (not prev_plugged or crossed_gap):
             # The EV was away between segments.  Its driving is represented
             # by the next segment's start SOC, not by autonomous charging.
             self._soc_pct = self._segments[self._active_segment_idx].start_soc
@@ -308,7 +381,12 @@ class EVModel:
         return self._plugged_in
 
     @property
-    def scenario(self) -> EVScenario:
+    def scenario(self) -> EVScenario | str:
+        """Return a built-in EVScenario, or the literal 'custom' for segments.
+
+        Custom is not a random-selectable enum member. Callers needing a plain
+        string can use getattr(model.scenario, "value", model.scenario).
+        """
         return self._scenario
 
     @property
@@ -333,4 +411,5 @@ class EVModel:
             battery_capacity_kwh=self.config.battery_capacity_kwh,
             max_charge_kw=self.config.max_charge_kw,
             charge_efficiency=self.config.charge_efficiency,
+            segments=self.config.segments,
         ))
