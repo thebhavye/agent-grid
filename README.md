@@ -1,6 +1,6 @@
 # AgentGrid
 
-Multi-agent simulated smart-home microgrid — LangGraph bidding, PINN battery health, SHAP explainability, edge LLM.
+Multi-agent simulated smart-home microgrid — urgency bidding, hybrid arbitration and closed-loop evaluation, orchestrated with LangGraph. PINN battery health, SHAP explainability and an edge LLM are planned (see Roadmap).
 
 AgentGrid is a simulated smart-home microgrid where autonomous agents (solar, battery, EV, appliances) score their own power urgency and a shared allocator arbitrates limited solar power between them.
 
@@ -10,13 +10,15 @@ This repository is private pending a planned patent filing.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Urgency-scoring agents | DONE |
-| 2 | LangGraph multi-agent bidding + arbiter | Implemented: deterministic graph with closed-loop record parity |
-| 3 | 24h synthetic dataset + baseline eval | DONE |
-| 4 | LLM-generated allocation explanations | not started |
-| 5 | PINN for battery SoH/thermal risk | not started |
-| 6 | Edge quantized LLM for fault interpretation | not started |
-| 7 | SHAP explainability | not started |
+| 1 | Urgency-scoring agents | DONE (feature selection planned: #86) |
+| 2 | LangGraph multi-agent bidding + arbiter | DONE: hybrid arbiter + deterministic graph with closed-loop record parity |
+| 3 | Synthetic dataset, digital twin + closed-loop evaluation | DONE: offline scenarios, paired hybrid vs baseline metrics |
+| 4 | LLM-generated allocation explanations | PARTIAL: facts-first explanations shipped; LLM renderer awaits a privacy decision (#59) |
+| 5 | PINN for battery SoH/thermal risk | planned (#69, #85) |
+| 6 | Edge quantized LLM for fault interpretation | planned (#84); labelled fault data exists |
+| 7 | SHAP explainability | planned (#83) |
+
+An interactive demo dashboard (Streamlit) is also implemented; see [Dashboard](#dashboard-demo-ui).
 
 ## Deterministic Bidding Graph
 
@@ -166,6 +168,7 @@ saved Vellore archive weather. No credentials or network access are needed.
 | `degraded_battery` | 2024-01-25 | Reduced capacity: 6 kWh |
 | `overnight_ev_cloudy` | 2023-12-04 | Overnight EV on a cloudy day |
 | `three_days` | 2024-01-25 repeated | 864 five-minute steps |
+| `demo_sunny_home` | 2024-01-25 | Dashboard default: 60 m² array so the battery visibly charges and discharges |
 
 ```python
 from scenarios import CATALOG, build_twin, list_scenarios
@@ -176,10 +179,11 @@ rows = twin.run_full_day(steps=CATALOG["three_days"]["steps"])
 
 The weather comes from [Open-Meteo historical reanalysis](https://open-meteo.com/en/docs/historical-weather-api),
 not station measurements or synthetic curves. Source URLs and attribution
-are recorded with the saved files. `three_days` repeats one weather day;
-late-EV-arrival support awaits explicit EV segments (#67).
+are recorded with the saved files. `three_days` repeats one weather day.
+Explicit EV charging segments (`EVModelConfig(segments=...)`, #67) can model
+cases such as a late EV arrival; no catalog scenario uses them yet.
 
-## Digital Twin (implemented, standalone)
+## Digital Twin
 
 In addition to the static synthetic dataset (`data/generate_dataset.py`), AgentGrid now has a live
 digital twin module (`digital_twin/`) — a tick-by-tick simulator modelling the same system (solar,
@@ -228,12 +232,17 @@ Notes:
 
 ## Current Progress
 
-- `agents/` holds the 4 agent classes (Solar, Battery, EV, Appliance) with
-  working `update_state()`, `get_demand_kw()`, and `compute_urgency()`.
-- `data/` generates the 24h synthetic dataset; `simulation/` runs the
-  capped proportional baseline allocator over it.
-- `test_agents.py` exercises the agents; `test_baseline.py` /
-  `test_simulation.py` cover the allocator and end-to-end pipeline.
+- `agents/`: Solar, Battery, EV and Appliance agents turn their state into a
+  validated bid (`demand_kw`, `urgency`); the battery also offers discharge supply.
+- `simulation/`: the hybrid arbiter (priority 1, then 2, then urgency bands), the
+  proportional baseline, battery mode selection, the closed-loop runner with
+  sensor/device fault policies, outcome metrics and the paired comparison
+  (`simulation/comparison_results.md`).
+- `orchestration/`: the same closed-loop step as a LangGraph graph.
+- `digital_twin/`, `scenarios/`, `data/`: the twin, offline scenarios and the
+  static dataset generator.
+- `explain/`: facts-first explanations derived from the arbiter's rules.
+- `dashboard/`: the Streamlit demo UI; `docs/demo-video.md`: the recording script.
 
 ## Dashboard (demo UI)
 
