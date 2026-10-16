@@ -11,12 +11,30 @@ This repository is private pending a planned patent filing.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Urgency-scoring agents | DONE |
-| 2 | LangGraph multi-agent bidding + arbiter | Prep: `get_bid()` contract merged; LangGraph bidding + arbiter pending |
+| 2 | LangGraph multi-agent bidding + arbiter | Implemented: deterministic graph with closed-loop record parity |
 | 3 | 24h synthetic dataset + baseline eval | DONE |
 | 4 | LLM-generated allocation explanations | not started |
 | 5 | PINN for battery SoH/thermal risk | not started |
 | 6 | Edge quantized LLM for fault interpretation | not started |
 | 7 | SHAP explainability | not started |
+
+## Deterministic Bidding Graph
+
+`orchestration.graph.run_graph_closed_loop(twin, allocator, steps=288)` runs
+independent `bid_<agent_id>` nodes, joins them at `battery_mode`, then executes
+`arbiter` and `commit`. It uses the same allocation phases and records as
+`run_closed_loop`; no LLM is involved and remote tracing is disabled.
+
+```python
+from orchestration.graph import run_graph_closed_loop
+from scenarios import build_twin
+from simulation.hybrid_arbiter import hybrid_allocate
+
+records = run_graph_closed_loop(build_twin("clear_day", closed_loop=True), hybrid_allocate)
+```
+
+LangGraph is pinned in `requirements.txt`; its imports stay in `orchestration/`.
+The plain runner remains available without importing the graph package.
 
 ## Running tests
 
@@ -201,8 +219,8 @@ Notes:
 - `simulation/run_simulation.py` provides `run_twin_simulation(twin, allocator)`, which uses the
   twin's own appliance roster and EV charging limit. It advances 288 configured timesteps
   (24 hours at the default five-minute step), then allocates solar over the resulting rows.
-  Allocations do not feed back into battery, EV, or appliance state yet; closed-loop evaluation
-  is planned for Phase 2 (see `decisions.md`).
+  Those replay allocations do not feed back into battery, EV, or appliance state.
+  Use `run_closed_loop` or `run_graph_closed_loop` for allocation-driven feedback.
 - Solar/battery models are simplified physics approximations, honestly documented in each
   module's docstring — not high-fidelity models.
 - Tests: `pytest digital_twin/ -m "not live"` (offline); the single `@pytest.mark.live` smoke test

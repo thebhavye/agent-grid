@@ -4,3 +4,4 @@ matplotlib==3.11.2
 pytest==9.1.1
 requests==2.34.2
 ruff==0.14.1
+langgraph==1.2.15
