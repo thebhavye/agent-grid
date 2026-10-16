@@ -14,14 +14,14 @@ Usage:
         #          household_load_kw, ev_soc_pct, ev_departure_min, ev_plugged_in
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
 from digital_twin.weather_client import WeatherClient
 from digital_twin.solar_model import SolarModel, SolarModelConfig
 from digital_twin.battery_model import BatteryModel, BatteryModelConfig
-from digital_twin.ev_model import EVModel, EVModelConfig, EVScenario
+from digital_twin.ev_model import EVModel, EVModelConfig
 from digital_twin.appliance_model import ApplianceModel, ApplianceModelConfig
 
 
@@ -89,7 +89,6 @@ class DigitalTwin:
         self._appliances = ApplianceModel(config.appliance_config)
 
         # Initialize sub-models at start time
-        self._solar_initialized = False
         self._initialize_models()
 
     def _initialize_models(self) -> None:

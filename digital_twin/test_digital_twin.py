@@ -21,7 +21,7 @@ import pytest
 from digital_twin.appliance_model import ApplianceModel, ApplianceModelConfig, ApplianceSpec
 from digital_twin.battery_model import BatteryModel, BatteryModelConfig
 from digital_twin.ev_model import EVModel, EVModelConfig, EVScenario
-from digital_twin.solar_model import SolarModel, SolarModelConfig
+from digital_twin.solar_model import SolarModel
 from digital_twin.twin import DigitalTwin, DigitalTwinConfig
 from digital_twin.weather_client import WeatherClient, _cache
 
@@ -1076,7 +1076,6 @@ class TestDigitalTwin:
     @pytest.mark.parametrize("seed", [1, 7, 42])
     def test_overnight_evening_segment_resets_soc_and_charges(self, seed):
         """Issue #45: returning from daytime driving restores evening start SOC."""
-        from digital_twin.ev_model import EVModel
 
         ev = EVModel(EVModelConfig(scenario=EVScenario.OVERNIGHT, seed=seed))
         ev.initialize_at(datetime(2024, 1, 15, 0, 0))
@@ -1184,7 +1183,6 @@ class TestDigitalTwin:
 
     def test_ev_reset_without_seed_replays_segments(self):
         """Issue #23: EVModel.reset() reuses the original seed."""
-        from digital_twin.ev_model import EVModel
 
         fresh = EVModel(EVModelConfig(scenario=EVScenario.OVERNIGHT, seed=7))
         fresh.initialize_at(datetime(2024, 1, 15, 0, 0))

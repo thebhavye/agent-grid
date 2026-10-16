@@ -36,7 +36,7 @@
 - Current static and twin-backed allocation runs are open-loop: allocations
   do not drive battery/EV SOC or appliance completion. Outcome comparisons
   require the planned Phase 2 closed-loop twin runner (see decisions.md).
-- EVAgent has a dead code path (minutes_left <= 0, ev_agent.py:59-60):
+- EVAgent.compute_urgency() has a dead code path (minutes_left <= 0):
   unreachable with real data (the generator unplugs exactly at the
   departure minute), untested.
 - Duplication/drift risk: overnight-wrap arithmetic is duplicated across
@@ -55,16 +55,11 @@
 - Twin EV holds target SOC after the 80% charge phase and gates noise on
   charging_kw > 0; the generator ramps through the full phase with noise
   while plugged.
-- Dead code/lint (no linter configured): unused `field` imports in
-  twin/battery/appliance models, unused `import time` in weather_client,
-  dead `prev_plugged` (ev_model), `_solar_initialized` (twin),
-  `next_cycle_start` (appliance state); `1440` hard-coded in 5 places;
+- `1440` is hard-coded in 5 places;
   the value 5.0 now has three unrelated meanings (battery max, legacy EV
   fallback, twin ev_charger rating).
 - Degenerate roster edge: an ApplianceAgent with usual_start == usual_end
   is always "outside window" and logs a missed-window event every timestep.
-- `.pytest_cache/` is not in .gitignore (untracked locally, but one
-  `git add -A` would sweep it in).
 - Digital twin solar peak is ~50% below generator peak (issue #29):
   twin default (20 m², 20%, 4 kWp) peaks at ~2.78 kW under 800 W/m² clear-sky
   conditions with temperature derating; generator peaks at 5.35–5.73 kW

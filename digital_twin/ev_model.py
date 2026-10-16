@@ -101,7 +101,8 @@ class EVModel:
 
     def _generate_segments(self) -> list[EVSegment]:
         """Generate charging segments based on scenario (matching generate_dataset.py logic)."""
-        snap = lambda m: float(round(m / 5) * 5)  # Snap to 5-min grid
+        def snap(m):
+            return float(round(m / 5) * 5)  # Snap to 5-min grid
 
         if self._scenario == EVScenario.OVERNIGHT:
             departure_min = snap(self._rng.uniform(6 * 60 + 30, 8 * 60 + 30))

@@ -13,7 +13,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from data.generate_dataset import generate_dataset, N_STEPS, STEP_MIN
+from data.generate_dataset import generate_dataset, N_STEPS
 
 REQUIRED_TIMESERIES_COLS = [
     "timestamp", "solar_gen_kw", "battery_soc_pct", "battery_health_pct",
