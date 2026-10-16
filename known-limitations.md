@@ -1,7 +1,8 @@
 # AgentGrid — Known Limitations
 
-- Surplus solar is discarded, not tracked anywhere in allocator output
-  (see decisions.md, issue #5).
+- There is no grid connection: solar beyond load and battery headroom is
+  curtailed (reported as curtailed_kw in closed-loop records), and load the
+  solar and battery cannot cover is unmet. Grid import/export is issue #61.
 - Appliance missed-window tracking is a per-timestep in-memory buffer
   (self.missed_windows, cleared on update_state, deduplicated per
   timestep — see decisions.md, issue #10), not persisted, logged to
@@ -13,10 +14,9 @@
 - Appliance deferable window ramp assumes a fixed 4-hour (240 min) window
   for all deferable appliances — not derived per-appliance from the
   dataset.
-- compute_urgency() has no cross-agent normalization — each agent's
-  urgency is independently scaled to [0,1] but not compared or weighted
-  against other agents yet. Relevant once Phase 2 bidding needs to rank
-  agents against each other.
+- compute_urgency() has no cross-agent normalization: each agent type scales
+  urgency to [0,1] with its own formula, yet the hybrid arbiter ranks
+  flexible agents of different types by these raw values.
 - Battery/EV max charge rate constants (BATTERY_MAX_CHARGE_KW, EV max
   charge kw) are hardcoded, not derived from a shared config or the
   dataset generator's own capacity assumptions.
@@ -34,9 +34,21 @@
   becomes 0.0; appliance window checks treat the time as unknown), while
   out-of-range integer components such as "25:90" are accepted. EVAgent's
   non-finite numeric timestamp rejection does not validate string clocks.
-- Current static and twin-backed allocation runs are open-loop: allocations
-  do not drive battery/EV SOC or appliance completion. Outcome comparisons
-  require the planned Phase 2 closed-loop twin runner (see decisions.md).
+- run_simulation() and run_twin_simulation() replays are open-loop:
+  allocations do not drive battery/EV SOC or appliance completion. Use
+  run_closed_loop() or run_graph_closed_loop() for outcome comparisons.
+- The hybrid arbiter is not uniformly better than the proportional
+  baseline: in the paired comparison it reduces critical unmet energy but
+  increases flexible unmet energy and EV departure shortfall
+  (simulation/comparison_results.md).
+- simulation/compare.py builds its paired runs from the mocked test-weather
+  fixture (importing helpers from digital_twin/test_digital_twin.py) rather
+  than the saved scenario library, so its published results are not on
+  real weather.
+- The dashboard runs the plain closed-loop runner, not the LangGraph graph
+  (their records are tested to be identical). Under injected sensor faults,
+  explanations for affected steps can fall back to describing outcomes without
+  policy reasons.
 - EVAgent.compute_urgency() has a dead code path (minutes_left <= 0):
   unreachable with real data (the generator unplugs exactly at the
   departure minute), untested.
@@ -73,3 +85,5 @@
   twin = specific physical system + real weather; generator = statistical
   synthetic solar curves + synthetic clouds. Schema compatibility
   is maintained; users can configure a larger panel_area_m2 if needed.
+  The demo_sunny_home scenario does exactly this (60 m²) so the battery
+  cycles visibly; the other scenarios keep the 20 m² default.
