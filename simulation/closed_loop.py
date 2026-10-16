@@ -10,8 +10,7 @@ from typing import Callable
 
 from agents.appliance_agent import ApplianceAgent
 from agents.battery_agent import BatteryAgent, BatteryLimits
-from digital_twin.faults import DeviceFaultConfig, DeviceFaultInjector
-from digital_twin.faults import FaultConfig, FaultInjector
+from digital_twin.faults import DeviceFaultInjector, FaultInjector
 from simulation.battery_mode import choose_battery_mode
 from simulation.run_simulation import (
     _build_agents,
@@ -115,6 +114,7 @@ def _observation_watch_keys(agents) -> dict[str, list[str]]:
     return {
         "solar_gen_kw": ["solar_1"],
         "battery_soc_pct": ["battery_1"],
+        "battery_health_pct": ["battery_1"],
         "ev_soc_pct": ["ev_1"],
         "ev_departure_min": ["ev_1"],
         "ev_plugged_in": ["ev_1"],
@@ -123,16 +123,63 @@ def _observation_watch_keys(agents) -> dict[str, list[str]]:
     }
 
 
-def _is_bad_reading(value) -> bool:
-    """A reading is bad when missing, None, or non-finite numeric."""
-    if value is _MISSING or value is None:
+def _is_finite_number(value) -> bool:
+    """True for a finite int/float (booleans excluded)."""
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
+
+
+def _is_valid_timestamp(value) -> bool:
+    """True for a ``HH:MM`` string the agents can parse."""
+    if not isinstance(value, str):
+        return False
+    try:
+        hh, mm = value.split(":", 1)
+        int(hh)
+        int(mm)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def _is_valid_desired_kw(value) -> bool:
+    """True for an appliance-desired mapping of finite non-negative kW."""
+    if not isinstance(value, dict):
+        return False
+    return all(_is_finite_number(item) and item >= 0 for item in value.values())
+
+
+# Keys whose schema is a finite number, plus the one that may also be absent.
+_NUMERIC_WATCH_KEYS = frozenset(
+    {"solar_gen_kw", "battery_soc_pct", "battery_health_pct", "ev_soc_pct"}
+)
+_NULLABLE_NUMERIC_WATCH_KEYS = frozenset({"ev_departure_min"})
+
+
+def _is_bad_reading(key, value) -> bool:
+    """Return True when ``value`` is not a valid payload for ``key``.
+
+    Detection is key-specific so a finite number in place of an ``HH:MM``
+    timestamp, or a scalar in place of ``appliance_desired_kw``, is treated
+    as a bad reading rather than silently accepted by the agents.
+    """
+    if value is _MISSING:
         return True
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, (int, float)):
-        return not math.isfinite(value)
-    if isinstance(value, (str, dict)):
-        return False
+    if value is None:
+        return key not in _NULLABLE_NUMERIC_WATCH_KEYS
+    if key == "timestamp":
+        return not _is_valid_timestamp(value)
+    if key == "ev_plugged_in":
+        return not isinstance(value, bool)
+    if key == "appliance_desired_kw":
+        return not _is_valid_desired_kw(value)
+    if key in _NULLABLE_NUMERIC_WATCH_KEYS:
+        return not _is_finite_number(value)
+    if key in _NUMERIC_WATCH_KEYS:
+        return not _is_finite_number(value)
     return True
 
 
@@ -142,19 +189,31 @@ def _sanitize_observation(observation, watch, policy, max_hold_steps, state):
     Returns ``(sanitized, substitutions, excluded)``. ``state`` persists
     the last good value per key and the consecutive bad-step count per
     ``(agent_id, key)`` across the run. With the ``raise`` policy nothing
-    is changed, so agents keep their fail-fast behavior.
+    is changed, but a bad watched reading is rejected here so a missing or
+    malformed value can never reach an agent's silent default (for example
+    a missing SOC becoming 50%) and quietly corrupt a fault run.
     """
     sanitized = dict(observation)
     substitutions: list[dict] = []
     excluded: set[str] = set()
     if policy == "raise":
+        for key, agent_ids in watch.items():
+            if not agent_ids:
+                continue
+            raw = observation.get(key, _MISSING)
+            if _is_bad_reading(key, raw):
+                shown = "missing" if raw is _MISSING else repr(raw)
+                raise ValueError(
+                    f"{key} reading is {shown}; on_bad_reading='raise' refuses "
+                    "to substitute a default for a malformed sensor reading"
+                )
         return sanitized, substitutions, excluded
 
     last_good = state["last_good"]
     bad_counts = state["bad_counts"]
     for key, agent_ids in watch.items():
         raw = observation.get(key, _MISSING)
-        if not _is_bad_reading(raw):
+        if not _is_bad_reading(key, raw):
             last_good[key] = raw
             for agent_id in agent_ids:
                 bad_counts[(agent_id, key)] = 0
@@ -333,13 +392,19 @@ def run_closed_loop(
     Once sensor faults are injected the runner keeps the agents fail-fast
     but sanitizes the observation for them according to ``on_bad_reading``:
 
-    - ``"raise"`` (default): nothing is changed; a bad reading still raises,
-      reproducing the pre-fault behaviour exactly.
+    - ``"raise"`` (default): nothing is changed, but a watched reading that
+      is missing or malformed is rejected here, so it can never reach an
+      agent's silent default (for example a missing SOC becoming 50%).
     - ``"hold_last"``: a bad value is replaced with the agent's last good
       observation for at most ``max_hold_steps`` consecutive bad steps, then
       the agent falls back to ``"exclude"``.
     - ``"exclude"``: the affected agent bids zero for that step, so its
-      demand goes unserved and is recorded.
+      demand goes unserved; the clean demand is still recorded (see
+      ``unserved_kw``) rather than erased by the zero bid.
+
+    Held values are bounded by the clean observation so they cannot request
+    delivery the real devices cannot accept: EV/appliance bids are capped by
+    the clean demand and battery supply/headroom by the clean twin SOC.
 
     ``sensor_faults`` and ``device_faults`` accept a config, an injector, or
     ``None`` (feature off). Device faults (``inverter_trip``,
@@ -367,6 +432,12 @@ def run_closed_loop(
         raise ValueError("max_hold_steps must be a non-negative integer")
 
     agents = _build_closed_loop_agents(twin)
+    # A parallel, never-sanitized agent set tracks the clean observation so
+    # held sensor values can be bounded by what the real devices accept.
+    truth_agents = _build_closed_loop_agents(twin)
+    truth_battery = next(
+        agent for agent in truth_agents if isinstance(agent, BatteryAgent)
+    )
     priorities = _build_priorities(twin)
     battery = next(agent for agent in agents if isinstance(agent, BatteryAgent))
     watch = _observation_watch_keys(agents)
@@ -415,6 +486,10 @@ def run_closed_loop(
             ),
             "urgency": 1.0,
         })
+        truth_bids = {
+            bid["agent_id"]: float(bid["demand_kw"])
+            for bid in _bids_for_observation(truth_agents, observation)
+        }
         ev_config = twin._ev.config
         ev_headroom_kw = (
             (100.0 - twin._ev.soc_pct) / 100 * ev_config.battery_capacity_kwh
@@ -424,7 +499,15 @@ def run_closed_loop(
         if device_effects["ev_limit_kw"] is not None:
             ev_cap_kw = min(ev_cap_kw, device_effects["ev_limit_kw"])
         for bid in bids:
-            if bid["agent_id"] == "ev_1":
+            agent_id = bid["agent_id"]
+            if agent_id in {"battery_1", "solar_1"}:
+                continue
+            # A held reading must not request more than the clean device
+            # accepts (an unplugged EV, or reduced appliance demand).
+            clean_demand = truth_bids.get(agent_id)
+            if clean_demand is not None:
+                bid["demand_kw"] = min(bid["demand_kw"], clean_demand)
+            if agent_id == "ev_1":
                 bid["demand_kw"] = min(bid["demand_kw"], ev_cap_kw)
 
         battery_factor = device_effects["battery_factor"]
@@ -436,11 +519,25 @@ def run_closed_loop(
             battery_demand_kw = _require_finite_nonnegative(
                 battery.get_demand_kw(), "battery_demand_kw"
             )
-            battery_supply_kw = _require_finite_nonnegative(
-                battery.get_supply_kw(dt_min), "battery_supply_kw"
+            # A held SOC can overstate the energy above reserve or the free
+            # capacity, so bound physical delivery by the clean twin SOC
+            # before choosing the mode and allocating.
+            battery_supply_kw = min(
+                _require_finite_nonnegative(
+                    battery.get_supply_kw(dt_min), "battery_supply_kw"
+                ),
+                _require_finite_nonnegative(
+                    truth_battery.get_supply_kw(dt_min), "battery_supply_kw"
+                ),
             )
-            charge_headroom_kw = _require_finite_nonnegative(
-                battery.get_charge_headroom_kw(dt_min), "battery_headroom_kw"
+            charge_headroom_kw = min(
+                _require_finite_nonnegative(
+                    battery.get_charge_headroom_kw(dt_min), "battery_headroom_kw"
+                ),
+                _require_finite_nonnegative(
+                    truth_battery.get_charge_headroom_kw(dt_min),
+                    "battery_headroom_kw",
+                ),
             )
         if battery_factor < 1.0:
             battery_demand_kw = min(
@@ -563,12 +660,21 @@ def run_closed_loop(
         committed["battery_soc_pct"] = twin._battery.soc_pct
         committed["ev_soc_pct"] = twin._ev.soc_pct
 
+        # Excluded agents bid zero so the allocator serves them nothing, but
+        # their true demand (from the clean observation) is still recorded so
+        # the unserved amount is visible rather than erased.
+        record_bids = [
+            {**bid, "demand_kw": truth_bids.get(bid["agent_id"], bid["demand_kw"])}
+            if bid["agent_id"] in excluded
+            else bid
+            for bid in bids
+        ]
         record = _step_record(
             observation,
             dt_min,
             mode["mode"],
             available_kw,
-            bids,
+            record_bids,
             allocations,
             float(committed["battery_applied_kw"]),
             curtailed_kw,
@@ -578,6 +684,14 @@ def run_closed_loop(
             record["sensor_faults"] = sensor_labels
             record["substitutions"] = substitutions
             record["excluded_agents"] = sorted(excluded)
+            record["unserved_kw"] = {
+                bid["agent_id"]: max(
+                    0.0,
+                    float(bid["demand_kw"])
+                    - float(allocations.get(bid["agent_id"], 0.0)),
+                )
+                for bid in record_bids
+            }
         if device_enabled:
             record["device_faults"] = device_labels
         records.append(record)

@@ -390,9 +390,11 @@ Decision: the closed-loop runner owns a configurable
 `on_bad_reading` policy with values `"raise"` (default), `"hold_last"`, and
 `"exclude"`. Agents stay untouched and keep their own fail-fast validation;
 the runner sanitizes observations before calling `update_state`. A bad reading
-is a missing key, a NaN/inf value, or a malformed sensor payload. `raise`
-preserves today's behavior exactly: the offending agent raises, and the
-simulation stops, so a hidden fault can never masquerade as a good step.
+is a missing key, a NaN/inf value, or a payload that does not match the key's
+schema (for example a number where an `HH:MM` timestamp belongs). `raise`
+rejects a bad watched reading in the runner rather than relying on the agents,
+because agents substitute silent defaults (a missing SOC becomes 50%) that
+would let a hidden fault masquerade as a good step.
 
 Why agents keep fail-fast behavior: the runner is the only layer that knows
 whether a run wants to survive sensor noise or halt on it. Moving the policy
@@ -404,13 +406,15 @@ and CI, while exploratory or resilient runs opt in explicitly.
 Under `hold_last`, a substituted agent reuses its last good value for each
 affected key until the fault clears, but only for `max_hold_steps` consecutive
 steps (default 3); after that bound the agent is excluded for that step. Under
-`exclude`, an affected agent bids zero for that step, its demand is recorded as
-unserved, and it is listed in `excluded_agents`. Every substitution is logged in
-the step record as `{agent_id, key, policy, observed, used}`, so exports and
-tests can audit exactly what was replaced and why. Truth observations still
-drive physics, allocation, records, and accounting, so injected bad agent
-readings cannot break the power-balance or charge/discharge-exclusivity
-invariants.
+`exclude`, an affected agent bids zero for that step, so its demand goes
+unserved; the clean demand is still recorded (`demand_kw` plus an explicit
+`unserved_kw` map) rather than erased by the zero bid. Every substitution is
+logged in the step record as `{agent_id, key, policy, observed, used}`, so
+exports and tests can audit exactly what was replaced and why. Held values are
+bounded by the clean observation so a stale reading cannot request delivery the
+real devices reject: EV and appliance bids are capped by the clean demand, and
+battery supply/headroom by the clean twin SOC, so the power-balance,
+charge/discharge-exclusivity and reserve invariants hold even mid-hold.
 
 Device faults extend the #64 injector in `digital_twin/faults.py` and are
 applied through the twin `commit()` path so they change physics rather than

@@ -250,10 +250,11 @@ def test_hold_last_completes_full_run_and_logs_every_substitution():
     assert any(record["sensor_faults"] for record in records)
 
 
-def test_exclude_policy_zeroes_the_affected_agent_bid():
+def test_exclude_policy_records_true_demand_while_bidding_zero():
     config = FaultConfig(enabled=True, faults=[
         {"type": "nan", "key": "battery_soc_pct", "start_step": 10, "end_step": 14},
     ])
+    clean = run_closed_loop(make_test_twin(closed_loop=True), hybrid_allocate)
     twin = make_test_twin(closed_loop=True)
     records = run_closed_loop(
         twin, hybrid_allocate, on_bad_reading="exclude", sensor_faults=config
@@ -261,13 +262,117 @@ def test_exclude_policy_zeroes_the_affected_agent_bid():
     _assert_power_balance_and_exclusivity(records)
 
     faulted = records[10]
-    assert faulted["demand_kw"]["battery_1"] == 0.0
+    assert faulted["allocated_kw"]["battery_1"] == 0.0
     assert faulted["excluded_agents"] == ["battery_1"]
+    # The clean demand is still recorded (unserved), not erased by the
+    # zero allocator bid.
+    assert faulted["demand_kw"]["battery_1"] == pytest.approx(
+        clean[10]["demand_kw"]["battery_1"]
+    )
+    assert faulted["demand_kw"]["battery_1"] > 0.0
+    assert faulted["unserved_kw"]["battery_1"] == pytest.approx(
+        faulted["demand_kw"]["battery_1"]
+    )
     assert any(
         entry["policy"] == "exclude" and entry["agent_id"] == "battery_1"
         for entry in faulted["substitutions"]
     )
     assert records[9]["excluded_agents"] == []
+
+
+def test_exclude_records_unserved_ev_demand_from_clean_value():
+    config = FaultConfig(enabled=True, faults=[
+        {"type": "nan", "key": "ev_soc_pct", "start_step": 0, "end_step": 1},
+    ])
+    clean = run_closed_loop(make_test_twin(closed_loop=True), hybrid_allocate, steps=1)
+    twin = make_test_twin(closed_loop=True)
+    records = run_closed_loop(
+        twin, hybrid_allocate, steps=1, on_bad_reading="exclude", sensor_faults=config
+    )
+    record = records[0]
+    assert record["excluded_agents"] == ["ev_1"]
+    assert record["allocated_kw"]["ev_1"] == 0.0
+    assert record["demand_kw"]["ev_1"] == pytest.approx(clean[0]["demand_kw"]["ev_1"])
+    assert record["demand_kw"]["ev_1"] > 0.0
+    assert record["unserved_kw"]["ev_1"] == pytest.approx(record["demand_kw"]["ev_1"])
+
+
+def test_raise_policy_rejects_missing_and_malformed_watched_readings():
+    dropout = FaultConfig(enabled=True, faults=[
+        {"type": "dropout", "key": "battery_soc_pct", "start_step": 0, "end_step": 1},
+    ])
+    with pytest.raises(ValueError, match="battery_soc_pct"):
+        run_closed_loop(
+            make_test_twin(closed_loop=True), hybrid_allocate, steps=1,
+            sensor_faults=dropout,
+        )
+
+    malformed = FaultConfig(enabled=True, faults=[
+        {"type": "spike", "key": "timestamp", "start_step": 0, "end_step": 1,
+         "value": 123},
+    ])
+    with pytest.raises(ValueError, match="timestamp"):
+        run_closed_loop(
+            make_test_twin(closed_loop=True), hybrid_allocate, steps=1,
+            sensor_faults=malformed,
+        )
+
+
+def test_hold_last_near_reserve_never_crosses_reserve():
+    faults = [
+        {"type": "nan", "key": "battery_soc_pct", "start_step": 13, "end_step": 16},
+    ]
+    for allocator in ALLOCATORS:
+        config = FaultConfig(enabled=True, faults=faults)
+        records = run_closed_loop(
+            make_test_twin(closed_loop=True), allocator, steps=20,
+            on_bad_reading="hold_last", sensor_faults=config,
+        )
+        _assert_power_balance_and_exclusivity(records)
+        assert min(record["battery_soc_pct"] for record in records) >= 20.0 - 1e-9
+
+
+def test_hold_last_ev_departure_transition_cannot_charge_unplugged():
+    config = FaultConfig(enabled=True, faults=[
+        {"type": "nan", "key": "ev_plugged_in", "start_step": 93, "end_step": 96},
+    ])
+    records = run_closed_loop(
+        make_test_twin(closed_loop=True), hybrid_allocate, steps=100,
+        on_bad_reading="hold_last", sensor_faults=config,
+    )
+    _assert_power_balance_and_exclusivity(records)
+    for record in records[93:96]:
+        assert record["ev_plugged_in"] is False
+        assert record["ev_applied_kw"] == 0.0
+
+
+def test_hold_last_appliance_demand_drop_transition_completes():
+    config = FaultConfig(enabled=True, faults=[
+        {"type": "nan", "key": "appliance_desired_kw", "start_step": 109,
+         "end_step": 112},
+    ])
+    records = run_closed_loop(
+        make_test_twin(closed_loop=True), hybrid_allocate, steps=120,
+        on_bad_reading="hold_last", sensor_faults=config,
+    )
+    _assert_power_balance_and_exclusivity(records)
+    assert len(records) == 120
+
+
+def test_hold_last_malformed_timestamp_uses_previous_valid_reading():
+    config = FaultConfig(enabled=True, faults=[
+        {"type": "spike", "key": "timestamp", "start_step": 5, "end_step": 7,
+         "value": 123},
+    ])
+    records = run_closed_loop(
+        make_test_twin(closed_loop=True), hybrid_allocate, steps=10,
+        on_bad_reading="hold_last", sensor_faults=config,
+    )
+    _assert_power_balance_and_exclusivity(records)
+    assert any(
+        entry["key"] == "timestamp" and entry["policy"] == "hold_last"
+        for record in records[5:7] for entry in record["substitutions"]
+    )
 
 
 def test_hold_last_falls_back_to_exclude_after_max_steps():
