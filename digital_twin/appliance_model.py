@@ -301,21 +301,14 @@ class ApplianceModel:
         current = self._current_result()
         served = {}
         for spec in self.config.appliances:
-            desired = current["appliance_loads"][spec.appliance_id]
+            # EVModel owns charging; the roster entry is display-only.
             if spec.appliance_id == "ev_charger":
-                requested = (
-                    desired
-                    if autonomous
-                    else delivered.get(
-                        "appliance_ev_charger", delivered.get("ev_1", 0.0)
-                    )
-                )
-            else:
-                requested = (
-                    desired
-                    if autonomous
-                    else delivered.get(f"appliance_{spec.appliance_id}", 0.0)
-                )
+                continue
+            desired = current["appliance_loads"][spec.appliance_id]
+            requested = (
+                desired if autonomous
+                else delivered.get(f"appliance_{spec.appliance_id}", 0.0)
+            )
             served_kw = min(max(0.0, float(requested)), desired)
             served[spec.appliance_id] = served_kw
 
@@ -329,6 +322,7 @@ class ApplianceModel:
 
         result = self._current_result()
         result["appliance_desired_kw"] = dict(current["appliance_desired_kw"])
+        result["appliance_desired_kw"].pop("ev_charger", None)
         result["appliance_served_kw"] = served
         return result
 
