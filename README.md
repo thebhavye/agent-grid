@@ -264,3 +264,9 @@ The data layer (`dashboard/data.py`) has no Streamlit dependency and is covered 
 ## Visualization
 
 Run `python viz/plot_day.py --seed 42` to save `day_plot.png` with solar vs allocated power, allocations by agent group, and dataset battery/EV SOC with EV plug-in shading. SOC comes from the static dataset, not allocation feedback. Run the headless tests with `python -m pytest viz/test_plot_day.py`.
+
+## Demo Recording
+
+The [demo script and readiness checklist](docs/demo-video.md) covers a 5-6 minute
+offline walkthrough, dependency gates, fresh-environment checks and the manual
+record/upload steps. It does not claim a video has been recorded or uploaded.
