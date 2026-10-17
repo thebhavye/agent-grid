@@ -50,6 +50,18 @@ class BatteryModelConfig:
         ambient_temp_c: Ambient temperature (°C). Default 25.0.
         max_charge_rate_c: Maximum charge C-rate. Default 0.5C (6 kW for 12 kWh).
         max_discharge_rate_c: Maximum discharge C-rate. Default 1.0C (12 kW).
+        degradation: Opt-in synthetic aging; False preserves legacy output.
+        cycle_fade_pct_per_kwh: Assumed 0.0002 health percentage points per
+            terminal kWh, before stress multipliers.
+        calendar_fade_pct_per_day: Assumed 0.001 health percentage points per
+            day at full SOC and reference temperature.
+        c_rate_stress: Assumed dimensionless linear C-rate multiplier of 1.
+        aging_reference_temp_c: Assumed reference temperature of 25 degrees C.
+        aging_temperature_scale_c: Assumed 10 degrees C per exponential fold.
+
+    Source tier for ALL aging coefficients: explicit project assumptions,
+    not published chemistry-specific constants or fits to physical cell data.
+    The terms support synthetic experiments only; see battery_health/README.md.
     """
     capacity_kwh: float = 12.0
     charge_efficiency: float = 0.949  # sqrt(0.90)
