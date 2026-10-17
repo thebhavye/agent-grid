@@ -37,7 +37,7 @@ def _initial_conditions(twin):
     return {
         "start": twin.current_time, "dt": twin._time_delta_min,
         "battery_soc": twin._battery.soc_pct, "ev_soc": twin._ev.soc_pct,
-        "weather_payload": twin._weather_client._session._payload,
+        "weather_payload": twin._weather_client.get_weather(twin._weather_date),
         "ev_segments": [asdict(segment) for segment in twin._ev._segments],
         "appliance_states": {
             spec.appliance_id: dict(twin._appliances.get_appliance_state(spec.appliance_id))

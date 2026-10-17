@@ -10,6 +10,8 @@ import pytest
 import requests
 
 from scenarios import build_twin
+from digital_twin.test_digital_twin import DateAwareFakeSession, _make_fake_hourly
+from simulation.compare import _make_twin
 from simulation.closed_loop import proportional_adapter, run_closed_loop
 from simulation.hybrid_arbiter import hybrid_allocate
 import viz.plot_comparison as module
@@ -86,3 +88,16 @@ def test_reject_reused_factory_twin():
     twin = build_twin("clear_day", closed_loop=True)
     with pytest.raises(ValueError, match="separate"):
         module.plot_comparison(lambda: twin)
+
+
+def test_factory_weather_session_without_private_payload(monkeypatch):
+    def factory():
+        twin = _make_twin(42, "midday")
+        client = twin._weather_client
+        client._session = DateAwareFakeSession({twin._weather_date: _make_fake_hourly()})
+        client._profiles.clear()
+        assert not hasattr(client._session, "_payload")
+        return twin
+    monkeypatch.setattr(Figure, "savefig", lambda *args, **kwargs: None)
+    module.plot_comparison(factory)
+    assert not plt.get_fignums()
