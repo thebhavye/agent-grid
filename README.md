@@ -272,6 +272,16 @@ The data layer (`dashboard/data.py`) has no Streamlit dependency and is covered 
 
 ## Visualization
 
+Run `python viz/plot_comparison.py --scenario clear_day --output comparison.png`
+for a paired **closed-loop** comparison. All saved scenario names are supported,
+including `overnight_ev_cloudy` and the 864-step `three_days`. Panels show solar
+and actual load delivery, battery SOC and modes, EV SOC/targets/departures with
+full-interval plug-in shading, unmet energy, and outcome metrics. The two fresh
+twins must have identical initial conditions and exogenous schedules. SOC is
+shown at interval ends; unmet energy uses each record's actual timestep.
+`plot_comparison(fresh_twin_factory, save_path=...)` also accepts a factory
+for a 288-step experiment. Tests: `python -m pytest viz/ -q`.
+
 Run `python viz/plot_day.py --seed 42` to save `day_plot.png` with solar vs allocated power, allocations by agent group, and dataset battery/EV SOC with EV plug-in shading. SOC comes from the static dataset, not allocation feedback. Run the headless tests with `python -m pytest viz/test_plot_day.py`.
 
 ## Demo Recording
