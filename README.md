@@ -203,7 +203,8 @@ Main components (`digital_twin/`):
   −0.4%/°C derating above 25°C (crystalline-silicon STC assumption). Defaults: 20 m², 20%.
 - `battery_model.py` — stateful SOC with ~90% round-trip efficiency (0.949 each way), SOC clamped
   to [0, 100], plus a deliberately simple first-order thermal model. NOT the Phase 5 PINN; health
-  stays constant in this version.
+  stays constant by default. Opt-in synthetic degradation supports the #69
+  dataset and empirical baseline; it does not represent calibrated cell aging.
 - `ev_model.py` / `appliance_model.py` — scenario/state-based behaviour (NOT detailed electrical
   physics), reusing the generator's scenario patterns (overnight/midday/evening-topup) as live
   stateful models. Deterministic under a fixed seed.
