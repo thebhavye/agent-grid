@@ -559,3 +559,30 @@ Remote tracing is explicitly disabled even when enabled in the environment.
 Tests compare exact full-day records for both allocators, seeds 1/7/42 and all
 three built-in EV scenarios, plus graph topology, roster changes, reset and faults.
 This wraps the measured #57 trade-offs; it does not claim improved outcomes.
+
+## Issue #69 - Opt-in synthetic degradation and daily empirical baseline
+
+Use cycle aging weighted by actual terminal throughput, C-rate and cell
+temperature, plus calendar aging weighted by elapsed days, mean SOC squared
+and temperature. Every coefficient is a named BatteryModelConfig field with
+units and an explicit assumption label in its docstring. Defaults: cycle fade
+0.0002 health percentage points/kWh, calendar fade 0.001 percentage points/day,
+C-rate stress 1, temperature reference 25 C, e-fold temperature scale 10 C.
+These are illustrative assumptions, not chemistry-calibrated literature values.
+Health is monotonic and floored at zero; this task does not shrink capacity or
+change bidding. Disabled degradation retains exact legacy fixture/record output.
+
+The seeded dataset uses real committed delivery for three saved scenarios over
+multiple days, with per-step terminal energy, SOC, temperature, ambient and
+cumulative aging exposures, plus separate daily summaries. Saved weather/EV
+schedules repeat each day; appliance streams advance. Targets are daily health
+percentage and peak cell temperature. Remaining useful life is not inferred.
+
+Measured command: python -m battery_health.baseline --days 3 --seed 42.
+Train on demo_sunny_home and degraded_battery (6 days); hold out all heatwave
+data (3 days). Health MAE: 1.2789769243681803e-13 percentage points. Peak
+temperature MAE: 0.41239561050337414 C. These are conditional daily fits using
+the day's operation, not forecasts of unknown future behaviour. Health fits
+the generating exposure terms, so near-zero error is expected by construction,
+not evidence of real-cell generalization. A follow-up PINN must use comparable
+inputs and this held-out split, report an ablation and avoid a safety claim.

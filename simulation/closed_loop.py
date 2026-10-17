@@ -767,6 +767,7 @@ def _commit_step(context, data):
     states = data["states"]
     blocked_before = data["blocked_before"]
     drawn_before = data["drawn_before"]
+    ambient = twin._pending_observation["ambient_temp"]
     committed = twin.commit(delivered)
     actual_load_kw = (
         allocations["household_base_load"]
@@ -841,6 +842,22 @@ def _commit_step(context, data):
         twin, start, dt_min, states, blocked_before, drawn_before,
         priorities, battery.limits.reserve_pct, observation, committed,
     ))
+    if twin._battery.config.degradation:
+        model = twin._battery
+        cfg = model.config
+        record.update({
+            "battery_health_pct": model.health_pct,
+            "battery_temperature_c": model.temperature_c,
+            "ambient_temperature_c": float(ambient),
+            "battery_start_soc_pct": observation["battery_soc_pct"],
+            "battery_initial_health_pct": cfg.initial_health_pct,
+            "battery_initial_temperature_c": cfg.ambient_temp_c,
+            "battery_capacity_kwh": cfg.capacity_kwh,
+            "battery_c_rate": abs(battery_kw) / cfg.capacity_kwh,
+            "battery_throughput_kwh": model.throughput_kwh,
+            "battery_cycle_exposure": model.cycle_exposure,
+            "battery_calendar_exposure": model.calendar_exposure,
+        })
     return record
 
 

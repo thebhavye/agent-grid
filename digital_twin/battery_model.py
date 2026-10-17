@@ -16,13 +16,15 @@ Design assumptions (documented):
   - Temperature rises under high charge/discharge power (I²R losses)
   - Temperature decays exponentially toward ambient
   - Not the Phase 5 PINN — this is a deliberately simplified approximation.
-- Battery health: Constant for this version (no degradation modeling per day).
+- Battery health: Constant by default; optional illustrative cycle/calendar
+  aging is available for synthetic training data (not cell-calibrated).
 
 Energy conservation: The model never creates energy from nowhere.
 SOC is clamped to [0, 100].
 """
 
 from dataclasses import dataclass
+import math
 from typing import Optional
 
 
@@ -59,8 +61,31 @@ class BatteryModelConfig:
     ambient_temp_c: float = 25.0
     max_charge_rate_c: float = 0.5
     max_discharge_rate_c: float = 1.0
+    # Issue #69: ALL aging coefficients below are illustrative assumptions,
+    # not fitted cell data or published chemistry-specific constants. Units:
+    # cycle_fade_pct_per_kwh = health percentage points / terminal kWh;
+    # calendar_fade_pct_per_day = health percentage points / day at full SOC;
+    # c_rate_stress = dimensionless per C; temperature_scale_c = degrees C
+    # for one e-fold increase above aging_reference_temp_c. No RUL claim.
+    degradation: bool = False
+    cycle_fade_pct_per_kwh: float = 0.0002
+    calendar_fade_pct_per_day: float = 0.001
+    c_rate_stress: float = 1.0
+    aging_reference_temp_c: float = 25.0
+    aging_temperature_scale_c: float = 10.0
 
     def __post_init__(self):
+        if not isinstance(self.degradation, bool):
+            raise ValueError("degradation must be boolean")
+        for name in ("cycle_fade_pct_per_kwh", "calendar_fade_pct_per_day",
+                     "c_rate_stress", "aging_reference_temp_c", "aging_temperature_scale_c"):
+            value = getattr(self, name)
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+            if name != "aging_reference_temp_c" and value < 0:
+                raise ValueError(f"{name} must be non-negative")
+        if self.aging_temperature_scale_c <= 0:
+            raise ValueError("aging_temperature_scale_c must be positive")
         if self.capacity_kwh <= 0:
             raise ValueError("capacity_kwh must be positive")
         if not 0 < self.charge_efficiency <= 1:
@@ -86,6 +111,9 @@ class BatteryModel:
         self._health_pct = self.config.initial_health_pct
         self._temperature_c = self.config.ambient_temp_c
         self._ambient_temp_c = self.config.ambient_temp_c
+        self.throughput_kwh = 0.0
+        self.cycle_exposure = 0.0
+        self.calendar_exposure = 0.0
 
     @property
     def soc_pct(self) -> float:
@@ -96,7 +124,7 @@ class BatteryModel:
     def health_pct(self) -> float:
         """Current battery health (%).
 
-        Note: In this version, health is constant (no daily degradation).
+        Constant unless illustrative degradation is explicitly enabled.
         """
         return self._health_pct
 
@@ -150,6 +178,12 @@ class BatteryModel:
                 - "energy_charged_kwh": Energy added to battery (kWh)
                 - "energy_discharged_kwh": Energy removed from battery (kWh)
         """
+        if self.config.degradation:
+            values = [charge_power_kw, time_delta_min]
+            if ambient_temp_c is not None:
+                values.append(ambient_temp_c)
+            if any(not math.isfinite(v) for v in values) or time_delta_min <= 0:
+                raise ValueError("degradation update requires finite inputs and positive timestep")
         if ambient_temp_c is not None:
             self._ambient_temp_c = ambient_temp_c
 
@@ -219,6 +253,24 @@ class BatteryModel:
         # Clamp temperature to reasonable bounds
         self._temperature_c = max(-20.0, min(60.0, self._temperature_c))
 
+        if self.config.degradation:
+            # Use transferred energy, not requested power at a full/empty clamp.
+            terminal_kwh = (energy_charged_kwh / self.config.charge_efficiency
+                            + energy_discharged_kwh * self.config.discharge_efficiency)
+            c_rate = terminal_kwh / time_delta_h / self.config.capacity_kwh
+            thermal_stress = math.exp(max(-50.0, min(50.0,
+                (self._temperature_c - self.config.aging_reference_temp_c)
+                / self.config.aging_temperature_scale_c)))
+            cycle = terminal_kwh * (1 + self.config.c_rate_stress * c_rate) * thermal_stress
+            mean_soc = (soc_before + self._soc_pct) / 200
+            calendar = time_delta_h / 24 * mean_soc**2 * thermal_stress
+            self.throughput_kwh += terminal_kwh
+            self.cycle_exposure += cycle
+            self.calendar_exposure += calendar
+            self._health_pct = max(0.0, self._health_pct
+                - self.config.cycle_fade_pct_per_kwh * cycle
+                - self.config.calendar_fade_pct_per_day * calendar)
+
         return {
             "soc_pct": self._soc_pct,
             "health_pct": self._health_pct,
@@ -237,3 +289,6 @@ class BatteryModel:
         self._health_pct = health_pct if health_pct is not None else self.config.initial_health_pct
         self._temperature_c = temperature_c if temperature_c is not None else self.config.ambient_temp_c
         self._ambient_temp_c = self.config.ambient_temp_c
+        self.throughput_kwh = 0.0
+        self.cycle_exposure = 0.0
+        self.calendar_exposure = 0.0
