@@ -19,6 +19,7 @@ from simulation.run_simulation import (
     get_twin_ev_max_charge_kw,
 )
 from .baseline_allocator import allocate
+from .grid import GridConfig, settle_grid
 
 
 Allocator = Callable[[float, list[dict], dict[str, int]], dict[str, float]]
@@ -317,6 +318,8 @@ def _check_power_balance(
     battery_kw: float,
     delivered_to_loads_kw: float,
     curtailed_kw: float,
+    grid_import_kw: float = 0.0,
+    grid_export_kw: float = 0.0,
 ) -> None:
     """Check the closed-loop power conservation invariant."""
     charge_kw = max(0.0, battery_kw)
@@ -324,10 +327,11 @@ def _check_power_balance(
     if charge_kw > _EPSILON and discharge_kw > _EPSILON:
         raise RuntimeError("battery cannot charge and discharge in one step")
     if abs(
-        solar_kw + discharge_kw
+        solar_kw + discharge_kw + grid_import_kw
         - delivered_to_loads_kw
         - charge_kw
         - curtailed_kw
+        - grid_export_kw
     ) > _EPSILON:
         raise RuntimeError("closed-loop power balance violated")
 
@@ -436,12 +440,14 @@ def _outcome_metadata(twin, start, dt_min, states, blocked_before, drawn_before,
 
 def _run_context(twin, allocator, steps, on_bad_reading="raise",
                  max_hold_steps=_DEFAULT_MAX_HOLD_STEPS,
-                 sensor_faults=None, device_faults=None):
+                 sensor_faults=None, device_faults=None, grid_config=None):
     """Validate a run and construct independent model-facing agent state."""
     if not getattr(twin, "_closed_loop", False):
         raise ValueError("run_closed_loop requires a twin configured with closed_loop=True")
     if twin.step_count != 0:
         raise ValueError("run_closed_loop requires a fresh twin with step_count == 0")
+    if grid_config is not None and not isinstance(grid_config, GridConfig):
+        raise ValueError("grid_config must be GridConfig or None")
     if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
         raise ValueError("steps must be a non-negative integer")
     if on_bad_reading not in _ON_BAD_READING_POLICIES:
@@ -490,6 +496,7 @@ def _run_context(twin, allocator, steps, on_bad_reading="raise",
         "dt_min": dt_min,
         "on_bad_reading": on_bad_reading,
         "max_hold_steps": max_hold_steps,
+        "grid_config": grid_config,
     }
 
 
@@ -715,6 +722,30 @@ def _allocate_step(context, data):
         - delivered_to_loads_kw
         - max(0.0, battery_kw),
     )
+    grid = None
+    config = context.get("grid_config")
+    if config is not None and config.enabled:
+        remaining = [
+            {**bid, "demand_kw": max(0.0, bid["demand_kw"] - allocations[bid["agent_id"]])}
+            for bid in bids if bid["agent_id"] in load_allocations
+        ]
+        start = data["start"]
+        minute = start.hour*60 + start.minute + start.second/60 + start.microsecond/6e7
+        shortfall = sum(b["demand_kw"] for b in remaining)
+        # Round-off at a fully used budget is not a second physical flow.
+        shortfall = shortfall if shortfall > _EPSILON else 0.0
+        surplus = curtailed_kw if curtailed_kw > _EPSILON else 0.0
+        grid = settle_grid(shortfall, surplus,
+                           minute, context["dt_min"], config)
+        extra = allocator(grid["import_kw"], remaining, priorities)
+        _validate_allocations(extra, remaining)
+        if abs(sum(extra.values()) - grid["import_kw"]) > _EPSILON:
+            raise RuntimeError("allocator did not deliver the settled grid import")
+        for name, value in extra.items():
+            allocations[name] += float(value)
+            load_allocations[name] += float(value)
+        delivered_to_loads_kw = sum(load_allocations.values())
+        curtailed_kw = max(0.0, curtailed_kw - grid["export_kw"])
     if mode["mode"] == "discharge" and curtailed_kw > _EPSILON:
         raise RuntimeError("discharge mode cannot curtail power")
     _check_power_balance(
@@ -722,6 +753,8 @@ def _allocate_step(context, data):
         battery_kw,
         delivered_to_loads_kw,
         curtailed_kw,
+        grid["import_kw"] if grid else 0.0,
+        grid["export_kw"] if grid else 0.0,
     )
 
     delivered = {"battery_1": battery_kw}
@@ -737,6 +770,7 @@ def _allocate_step(context, data):
         "battery_kw": battery_kw,
         "curtailed_kw": curtailed_kw,
         "delivered": delivered,
+        "grid": grid,
     })
 
 
@@ -778,6 +812,8 @@ def _commit_step(context, data):
     _check_power_balance(
         observation["solar_gen_kw"], committed["battery_applied_kw"],
         actual_load_kw, curtailed_kw,
+        data["grid"]["import_kw"] if data["grid"] else 0.0,
+        data["grid"]["export_kw"] if data["grid"] else 0.0,
     )
     dt_hours = dt_min / 60
     battery_cfg = twin._battery.config
@@ -841,6 +877,11 @@ def _commit_step(context, data):
         twin, start, dt_min, states, blocked_before, drawn_before,
         priorities, battery.limits.reserve_pct, observation, committed,
     ))
+    if data["grid"] is not None:
+        record.update({"grid_import_kw": data["grid"]["import_kw"],
+                       "grid_export_kw": data["grid"]["export_kw"],
+                       "import_cost": data["grid"]["import_cost"],
+                       "export_credit": data["grid"]["export_credit"]})
     return record
 
 
@@ -852,6 +893,7 @@ def run_closed_loop(
     max_hold_steps: int = _DEFAULT_MAX_HOLD_STEPS,
     sensor_faults=None,
     device_faults=None,
+    grid_config=None,
 ) -> list[dict]:
     """Run an allocator against a fresh closed-loop digital twin.
 
@@ -886,10 +928,15 @@ def run_closed_loop(
     fault is added to the step record only when the corresponding fault
     feature is enabled, so a run without faults is byte-identical to one
     before this feature.
+
+    Optional grid_config imports to unmet loads by re-running the supplied
+    allocator, and exports otherwise curtailed solar. It never charges the
+    battery from the grid. None or GridConfig(enabled=False) leaves records
+    unchanged. Enabled records include terminal flows and tariff settlement.
     """
     context = _run_context(
         twin, allocator, steps, on_bad_reading, max_hold_steps,
-        sensor_faults, device_faults,
+        sensor_faults, device_faults, grid_config,
     )
     records = []
     for step in range(steps):
