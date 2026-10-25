@@ -119,3 +119,22 @@ def test_physics_basis_does_not_read_next_state_labels():
     after = operation_row(changed, config)
     for key in ("physics_loss_pct", "cycle_loss_pct", "calendar_loss_pct", "physics_temp_delta_c"):
         assert after[key] == original[key]
+
+
+
+@pytest.mark.parametrize("soc,power", [(100, 6), (0, -6)])
+def test_cycle_fade_uses_transferred_energy_at_soc_clamps(soc, power):
+    battery = BatteryModel(BatteryModelConfig(
+        degradation=True, initial_soc_pct=soc, calendar_fade_pct_per_hour=0))
+    battery.update(power, 5)
+    assert battery.health_pct == battery.config.initial_health_pct
+
+
+
+@pytest.mark.parametrize("dt", [0, -5, float("nan"), float("inf")])
+def test_invalid_degradation_timestep_does_not_mutate_state(dt):
+    battery = BatteryModel(BatteryModelConfig(degradation=True))
+    before = vars(battery).copy()
+    with pytest.raises(ValueError, match="positive timestep"):
+        battery.update(1, dt, 40)
+    assert vars(battery) == before

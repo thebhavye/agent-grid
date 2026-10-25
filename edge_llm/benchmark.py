@@ -26,14 +26,15 @@ def main():
     text = advisor.advise(event)
     seconds = time.perf_counter() - started
     model = advisor._model
-    tokens = len(model.tokenize(text.encode())) if model is not None else None
+    tokens = len(model.tokenize(text.encode())) if model is not None and advisor.last_source == "local_model" else None
     metadata = getattr(model, "metadata", {}) if model is not None else {}
     print(json.dumps({"host": platform.platform(), "machine": platform.machine(),
                       "source": advisor.last_source, "model_path": advisor.model_path,
                       "model_name": metadata.get("general.name"),
                       "quantization": metadata.get("general.file_type"),
                       "load_seconds": load_seconds, "advice_seconds": seconds,
-                      "peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
+                      "peak_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                      / (1024 ** 2 if platform.system() == "Darwin" else 1024),
                       "output_tokens": tokens, "tokens_per_second": tokens / seconds if tokens else None},
                      indent=2))
 

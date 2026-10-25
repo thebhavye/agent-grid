@@ -71,3 +71,25 @@ def test_loading_failure_is_cached(tmp_path, monkeypatch):
     advisor.advise(event())
     advisor.advise(event())
     factory.assert_called_once()
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_benchmark_only_counts_accepted_model_output(monkeypatch, capsys, accepted):
+    import json
+    import sys
+    from edge_llm import benchmark
+    model = Mock(metadata={})
+    model.tokenize.return_value = [1, 2, 3]
+    advisor = Mock(_model=model, model_path="fake.gguf",
+                   last_source="local_model" if accepted else "fallback")
+    advisor.advise.return_value = "Check inverter alarms."
+    monkeypatch.setattr(benchmark, "FaultAdvisor", lambda path: advisor)
+    monkeypatch.setattr(sys, "argv", ["benchmark"])
+    benchmark.main()
+    report = json.loads(capsys.readouterr().out)
+    assert report["output_tokens"] == (3 if accepted else None)
+    if accepted:
+        assert report["tokens_per_second"] > 0
+    else:
+        assert report["tokens_per_second"] is None
+        model.tokenize.assert_not_called()

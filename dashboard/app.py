@@ -1,6 +1,8 @@
 """AgentGrid dashboard: run with `streamlit run dashboard/app.py`."""
 
 import sys
+import os
+from threading import Lock
 from pathlib import Path
 
 import plotly.graph_objects as go
@@ -57,6 +59,20 @@ def load_health_model():
 @st.cache_data(show_spinner=False)
 def load_comparison(scenario, fault, policy):
     return data.comparison(scenario, fault, policy)
+
+
+@st.cache_resource(show_spinner=False)
+def load_advisor(model_path):
+    from edge_llm import FaultAdvisor
+    return FaultAdvisor(model_path=model_path), Lock()
+
+
+@st.cache_data(show_spinner=False)
+def event_advice(model_path, event):
+    advisor, lock = load_advisor(model_path)
+    with lock:
+        advice = advisor.advise(event)
+        return advice, advisor.last_source
 
 
 def base_layout(fig, title, y_title, height=320):
@@ -316,17 +332,17 @@ with agents_tab:
 
 with faults_tab:
     st.subheader("Advisor")
-    from edge_llm import FaultAdvisor, summarize_faults
-    advisor = FaultAdvisor()
+    from edge_llm import summarize_faults
+    model_path = os.environ.get("AGENTGRID_GGUF_MODEL")
     advice_events = summarize_faults(records)
     if not advice_events:
         st.caption("No labelled fault events in this run.")
     for event in advice_events:
-        advice = advisor.advise(event)
+        advice, source = event_advice(model_path, event)
         st.markdown(f"**{event['fault_type']} · {event['device']} · "
                     f"steps {event['start_step']}–{event['end_step']} (end exclusive)**")
         st.write(advice)
-        st.caption(f"Source: {advisor.last_source}. Coincident unmet energy "
+        st.caption(f"Source: {source}. Coincident unmet energy "
                    f"{event['coincident_unmet_kwh']:.3f} kWh; this is not causal fault impact.")
 
 with overview:
