@@ -1,0 +1,7 @@
+{
+  "training_rows": 10549,
+  "heldout_rows": 1772,
+  "heldout_scenario": "heatwave",
+  "r2": 0.9821601927830367,
+  "mae": 0.02109479361664447
+}

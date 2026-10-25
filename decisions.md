@@ -619,3 +619,144 @@ dt_min edges, including the final interval. Catalog scenarios retain their
 configured run length; factory inputs run 288 steps. Agg and finally-close
 keep the CLI headless and release figures even after a save error. No physics,
 policy, data or metrics are changed to improve the visual comparison.
+
+
+## Issues #59, #83, #84, #85 and #86 — Optional research modules
+
+### #59: facts-first rendering and privacy
+
+The existing facts/template implementation stays the default. An injected
+renderer is callable only with `enabled=True`; an API key alone does not enable
+external disclosure. No external API was called for this change. Only computed
+facts are supplied to the client. A shared numeric-token guard compares claims
+at six-decimal precision and falls back on unsupported numbers, empty/non-text
+output or exceptions. Numeric consistency does not establish semantic truth;
+spelled-out numbers and misuse of an otherwise valid number are limitations.
+Optional SHAP factors are labelled surrogate contributions, not arbiter causes.
+This extends the earlier #59 decision without granting blanket external API
+approval or changing the deterministic reason codes.
+
+### #83: surrogate fidelity
+
+Pre-decision features are captured only when explicitly requested by the runner;
+the dashboard requests them. Default runner records remain unchanged. Legacy
+record reconstruction is approximate because stored SOC is post-commit. The
+histogram gradient boosting surrogate uses a non-decreasing urgency constraint;
+SHAP additivity and selected flexible-agent monotonicity cases are tested.
+Training: clear_day and monsoon_cloudy, seeds 1/7/42. Holdout: heatwave, seed 13.
+Observed held-out R² **0.982160**, served-fraction MAE **0.021095** (10549 training rows; 1772 holdout rows).
+This measures imitation of the hybrid arbiter, not causal influence or
+outcome superiority. The optional dashboard panel shows top-three factors,
+model fidelity and a chosen agent/step. No baseline/fault explanation claim is
+made. Full report: `docs/evaluations/shap-surrogate.json`.
+
+### #86: selected-feature urgency versus existing formulas
+
+A separate multi-output random-forest surrogate ranks candidate inputs against
+critical unmet, flexible unmet and EV departure shortfall (training-standard-
+deviation scaling). Permutation importance is held-out MSE increase. Training
+uses clear_day, monsoon_cloudy and demo_sunny_home, seeds 1/7/42. Validation uses
+heatwave and demo_sunny_home, seeds 13/29. The battery's validation therefore
+holds out seeds, not a scenario: heatwave has no charging rows. The one-hour
+solar forecast is persistence, not future saved weather. Recent unmet is an
+exponentially decayed one-hour history updated after each decision. Candidate
+health is constant here; zero importance does not establish irrelevance.
+
+Selected positively ranked inputs (at most three per type):
+- appliance: recent_unmet_kwh, hour_sin, solar_forecast_kw
+- battery: hour_sin, soc_gap, recent_unmet_kwh
+- ev: recent_unmet_kwh, solar_forecast_kw
+
+The candidate gives equal weight to these normalized inputs; it is a deliberately
+simple mapping, not an optimized learned controller. The comparison uses fresh
+paired twins and the fairness/scoring checks in `simulation/compare.py`, with
+seeds 5/19/31 separate from ranking. Delta is selected minus current:
+
+| Scenario | Seed | Critical unmet Δ kWh | Flexible unmet Δ kWh | EV shortfall Δ pp |
+|---|---|---|---|---|
+| clear_day | 5 | 0.000000 | 8.437841 | -3.441505 |
+| clear_day | 19 | 0.000000 | 10.693338 | 0.989938 |
+| clear_day | 31 | 0.000000 | -0.297322 | -2.467343 |
+| monsoon_cloudy | 5 | 0.000000 | 0.000000 | 0.000000 |
+| monsoon_cloudy | 19 | 0.000000 | 0.000000 | 0.000000 |
+| monsoon_cloudy | 31 | 0.000000 | 0.000000 | 0.000000 |
+| heatwave | 5 | 0.000000 | -0.068702 | -2.744760 |
+| heatwave | 19 | 0.000000 | 10.462952 | 0.442174 |
+| heatwave | 31 | 0.000000 | 8.734503 | -2.658333 |
+
+Decision: **keep existing urgency formulas as the default**. Results are mixed,
+with sizeable flexible-unmet regressions and some EV regressions. This does not
+justify promotion. The run count is small, step rows are correlated, and
+permutation spread is not a run-level confidence interval. All rankings and
+paired metrics are in `docs/evaluations/feature-selection.json`.
+
+### #85: battery dataset, empirical baseline and PINN ablation
+
+Minimum #69 prerequisites are included: opt-in diagnostic degradation, multi-day
+closed-loop data, daily summaries, and an empirical least-squares baseline.
+Health never scales dispatch or nominal capacity in this experiment. The thermal
+recurrence is unchanged. Coefficients are **assumptions**, not calibrated cell
+chemistry: cycle fade 0.02 percentage points/EFC (absolute terminal throughput /
+twice nominal capacity), calendar fade 0.0001 percentage points/hour, linear
+C-rate coefficient 1, linear mean-SOC coefficient 1, reference temperature 25 °C,
+and doubling per 10 °C. All are named `BatteryModelConfig` fields. Higher C-rate,
+temperature and SOC accelerate fade in paired tests. Default degradation off
+matches original records/scores, checked against the pre-change main commit.
+These coefficients have no measured source and must not be used for lifetime
+claims. No remaining-useful-life target is selected.
+
+The small CPU network predicts one-step health loss and temperature change from
+operation features; its loss includes empirical aging/thermal residuals plus a
+monotonic-health penalty. Training uses clear_day/monsoon_cloudy, three days,
+seed 42. Holdout uses heatwave, three days, seed 13. Same-network, same-seed
+ablation has zero physics weight. These noise-free labels largely duplicate
+the physics targets, limiting what the ablation establishes. Baseline/physics
+inputs are derived from pre-step state and applied power, never next-state labels.
+
+| Model | SoH MAE (pp, step) | Temperature MAE (°C, step) | Day-end SoH MAE (pp) | Daily peak temperature MAE (°C) |
+|---|---|---|---|---|
+| Empirical baseline | 5.9211895e-16 | 8.635068e-17 | 1.7053026e-13 | 0 |
+| PINN | 6.8724535e-06 | 0.1057941 | 0.0019448583 | 0.015466318 |
+| Without physics | 6.8676088e-06 | 0.11407207 | 0.0019714142 | 0.030218047 |
+
+The PINN **does not beat the empirical baseline**. Baseline residuals are near
+floating-point precision because it fits the generating equations. Training
+both networks plus dataset generation took 2.60 seconds on this cloud CPU;
+weights reproduce via `python -m battery_health.train`, so no weights are
+committed. Daily health errors accumulate one-step losses from observed state;
+temperatures are also conditioned on observed state, not autonomous forecasts.
+The opt-in dashboard panel shows the selected run's predicted/twin trajectories
+and labelled risks. Thresholds (45 °C or 1 °C/min rise) are demonstration
+assumptions, not manufacturer limits. A constructed hot high-C-rate prediction
+and separate rapid-rise case exercise the flags. No real-cell accuracy claim.
+Full report: `docs/evaluations/battery-health.json`.
+
+### #84: local fault advice and remaining measurement gap
+
+The advisor uses compact contiguous fault events, labelled sources and fallback
+guidance for all eight current fault types. Coincident unmet energy is reported
+without claiming causal impact. GGUF loading is lazy/optional and local;
+failures and invented readings fall back to rules. Tests use injected models,
+never a network download. Model weights are ignored by git. Setup and a model
+licence reference are in `docs/research.md`.
+
+On this Linux x86_64 cloud host, the rules-only benchmark used approximately
+11 MiB peak process RSS and microsecond-scale advice latency. No GGUF was
+available: model name, quantization and tokens/s are **not measured** (null in
+`docs/evaluations/fault-advisor.json`). This is not the requested demo-laptop
+model benchmark. `python -m edge_llm.benchmark --model /path/model.gguf` reports
+cold loading, latency, peak RSS, model metadata and approximate output tokens/s.
+The real-model laptop benchmark remains an explicit acceptance gap; #84 must
+not be considered fully closed on the strength of fake-model tests alone.
+
+### PR #95 review follow-up
+
+Cache the local advisor resource by model path and cache advice together with
+its source by event facts, so dashboard widget reruns do not reload weights or
+repeat inference. Serialize access to the shared model to keep llama.cpp calls
+and source attribution consistent across concurrent sessions. Benchmark token
+counts and throughput are null whenever rule-based fallback is returned, even
+if a model loaded successfully; peak RSS uses the platform's native units.
+Diagnostic cycle fade uses actual transferred terminal energy at SOC clamps,
+and invalid degradation timesteps are rejected before state mutation. These
+changes leave default simulation behavior unchanged.

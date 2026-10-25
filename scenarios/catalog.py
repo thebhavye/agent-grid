@@ -87,7 +87,7 @@ def list_scenarios() -> list[str]:
     return sorted(CATALOG)
 
 
-def build_twin(name, closed_loop=False) -> DigitalTwin:
+def build_twin(name, closed_loop=False, *, seed=None, battery_config=None) -> DigitalTwin:
     """Build a fresh twin using saved weather, with no network or disk cache.
 
     The weather anchor remains the scenario's source day across multi-day
@@ -103,9 +103,9 @@ def build_twin(name, closed_loop=False) -> DigitalTwin:
         weather_date_override=start,
         weather_client=_OfflineWeatherClient(_WEATHER_DIR / scenario["weather_file"]),
         solar_config=SolarModelConfig(panel_area_m2=scenario.get("panel_area_m2", 20.0)),
-        ev_config=EVModelConfig(scenario=scenario["ev_scenario"], seed=scenario["ev_seed"]),
-        appliance_config=ApplianceModelConfig(seed=scenario["appliance_seed"]),
-        battery_config=BatteryModelConfig(
+        ev_config=EVModelConfig(scenario=scenario["ev_scenario"], seed=scenario["ev_seed"] if seed is None else seed),
+        appliance_config=ApplianceModelConfig(seed=scenario["appliance_seed"] if seed is None else seed),
+        battery_config=battery_config or BatteryModelConfig(
             initial_soc_pct=scenario["initial_soc_pct"], capacity_kwh=scenario["capacity_kwh"],
         ),
         time_delta_min=scenario["time_delta_min"],

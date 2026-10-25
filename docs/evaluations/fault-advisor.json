@@ -1,0 +1,13 @@
+{
+  "host": "Linux-6.18.55-x86_64-with-glibc2.41",
+  "machine": "x86_64",
+  "source": "fallback",
+  "model_path": null,
+  "model_name": null,
+  "quantization": null,
+  "load_seconds": 6.519999260490295e-07,
+  "advice_seconds": 1.2130000186516554e-06,
+  "peak_rss_mib": 11.0,
+  "output_tokens": null,
+  "tokens_per_second": null
+}

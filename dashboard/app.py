@@ -35,8 +35,23 @@ st.markdown(
 
 
 @st.cache_data(show_spinner=False)
-def load_run(scenario, strategy, fault, policy):
-    return data.run(data.RunKey(scenario, strategy, fault, policy))
+def load_run(scenario, strategy, fault, policy, battery_health=False):
+    return data.run(data.RunKey(scenario, strategy, fault, policy, battery_health))
+
+
+@st.cache_resource(show_spinner="Fitting offline surrogate…")
+def load_surrogate():
+    from explain.shap_surrogate import evaluate, scenario_frame, train_surrogate
+    model = train_surrogate(scenario_frame())
+    return model, evaluate(model, scenario_frame(("heatwave",), (13,)))
+
+
+@st.cache_resource(show_spinner="Training battery-health model on saved scenarios…")
+def load_health_model():
+    from battery_health.dataset import generate_battery_dataset
+    from battery_health.pinn import train
+    return train(generate_battery_dataset(("clear_day", "monsoon_cloudy"), days=3))
+
 
 
 @st.cache_data(show_spinner=False)
@@ -161,14 +176,15 @@ with st.sidebar:
         policy = st.radio("Bad sensor reading policy", ["hold_last", "exclude"],
                           format_func={"hold_last": "Hold last good value",
                                        "exclude": "Exclude the agent"}.get)
+    health_enabled = st.checkbox("Battery health experiment", value=False)
     st.divider()
     st.caption("Closed-loop digital twin · offline saved Vellore weather · "
                "every step checked for power balance")
 
 other = "baseline" if strategy == "hybrid" else "hybrid"
 with st.spinner("Running the closed-loop simulation…"):
-    records = load_run(scenario, strategy, fault, policy)
-    other_records = load_run(scenario, other, fault, policy)
+    records = load_run(scenario, strategy, fault, policy, health_enabled)
+    other_records = load_run(scenario, other, fault, policy, health_enabled)
 start_date = CATALOG[scenario]["start_date"]
 frame = data.timeseries(records, start_date)
 groups = data.allocation_groups(records, start_date)
@@ -266,3 +282,79 @@ with faults_tab:
         if subs:
             st.markdown("**Sensor substitutions made by the runner**")
             st.dataframe(subs, hide_index=True, width="stretch")
+
+
+with agents_tab:
+    if strategy == "hybrid" and fault == "none" and st.checkbox("Show optional SHAP surrogate"):
+        try:
+            from explain.shap_surrogate import explain_step as shap_step
+            model, fidelity = load_surrogate()
+            candidates = [name for name, agent in record["agents"].items()
+                          if agent["demand_kw"] > 0 and name != "solar_1"
+                          and (name != "battery_1" or record["mode"] == "charge")]
+            if candidates:
+                selected_agent = st.selectbox("Agent for SHAP", candidates, format_func=data.agent_label)
+                result = shap_step(model, record, selected_agent)
+                st.subheader("Why (SHAP)")
+                factors = result["top_factors"]
+                fig = go.Figure(go.Bar(x=[f["shap_value"] for f in factors],
+                                       y=[f["feature"] for f in factors], orientation="h"))
+                st.plotly_chart(fig, width="stretch")
+                st.caption(f"Hybrid surrogate, heatwave holdout R² {fidelity['r2']:.3f}, "
+                           f"MAE {fidelity['mae']:.3f}. Contributions explain the model prediction, "
+                           "not causal effects.")
+                from explain.render import render_template
+                st.text(render_template({"timestamp": record["timestamp"],
+                                         "available_kw": record["available_kw"],
+                                         "total_demand_kw": sum(record["demand_kw"].values()),
+                                         "curtailed_kw": record["curtailed_kw"],
+                                         "agents": [], "surrogate_factors": factors}))
+            else:
+                st.info("No positive-demand agent at this moment.")
+        except ImportError:
+            st.info("Install requirements-research.txt to enable SHAP explanations.")
+
+with faults_tab:
+    st.subheader("Advisor")
+    from edge_llm import FaultAdvisor, summarize_faults
+    advisor = FaultAdvisor()
+    advice_events = summarize_faults(records)
+    if not advice_events:
+        st.caption("No labelled fault events in this run.")
+    for event in advice_events:
+        advice = advisor.advise(event)
+        st.markdown(f"**{event['fault_type']} · {event['device']} · "
+                    f"steps {event['start_step']}–{event['end_step']} (end exclusive)**")
+        st.write(advice)
+        st.caption(f"Source: {advisor.last_source}. Coincident unmet energy "
+                   f"{event['coincident_unmet_kwh']:.3f} kWh; this is not causal fault impact.")
+
+with overview:
+    if health_enabled:
+        st.subheader("Battery health")
+        try:
+            import pandas as pd
+            from battery_health.dataset import operation_row
+            from battery_health.pinn import thermal_risk
+            from digital_twin.battery_model import BatteryModelConfig
+            config = BatteryModelConfig(degradation=True, capacity_kwh=CATALOG[scenario]["capacity_kwh"])
+            throughput = 0.0
+            rows = []
+            for item in records:
+                rows.append(operation_row(item, config, throughput))
+                throughput += abs(item["battery_kw"]) * item["dt_min"] / 60
+            battery_frame = pd.DataFrame(rows)
+            prediction = load_health_model().predict(battery_frame)
+            chart = pd.DataFrame({"Time": frame.time, "Predicted SoH (%)": prediction[:, 0],
+                                  "Twin SoH (%)": battery_frame.next_health_pct}).set_index("Time")
+            st.line_chart(chart)
+            temp_chart = pd.DataFrame({"Time": frame.time, "Predicted temperature (°C)": prediction[:, 1],
+                                      "Twin temperature (°C)": battery_frame.next_temperature_c}).set_index("Time")
+            st.line_chart(temp_chart)
+            selected = battery_frame.iloc[step]
+            flags = thermal_risk(prediction[step, 1], selected.temperature_c, selected.dt_min)
+            st.write("Risk flags at selected moment: " + (", ".join(flags) if flags else "none"))
+            st.caption("Experimental one-step predictions conditioned on observed state; "
+                       "assumed aging coefficients and demonstration thresholds, not validated battery diagnostics.")
+        except ImportError:
+            st.info("Install requirements-battery.txt for battery-health predictions.")

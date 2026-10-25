@@ -1,0 +1,24 @@
+{
+  "heldout": "heatwave, seed 13, three days",
+  "training_rows": 1728,
+  "epochs": 400,
+  "baseline": {
+    "soh_mae_pct": 5.921189464667501e-16,
+    "temperature_mae_c": 8.635067969306773e-17,
+    "next_day_soh_mae_pct": 1.7053025658242404e-13,
+    "daily_peak_temperature_mae_c": 0.0
+  },
+  "pinn": {
+    "soh_mae_pct": 6.8724534758837465e-06,
+    "temperature_mae_c": 0.10579409758899859,
+    "next_day_soh_mae_pct": 0.0019448583067808538,
+    "daily_peak_temperature_mae_c": 0.015466317534446716
+  },
+  "without_physics": {
+    "soh_mae_pct": 6.867608795046175e-06,
+    "temperature_mae_c": 0.11407207317142062,
+    "next_day_soh_mae_pct": 0.0019714141738849853,
+    "daily_peak_temperature_mae_c": 0.0302180474003156
+  },
+  "elapsed_seconds": 3.146935444999997
+}

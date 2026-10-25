@@ -150,6 +150,7 @@ class RunKey:
     strategy: str
     fault: str = "none"
     policy: str = "hold_last"
+    battery_health: bool = False
 
 
 def run(key: RunKey) -> list[dict]:
@@ -161,14 +162,20 @@ def run(key: RunKey) -> list[dict]:
     if key.fault not in FAULT_PRESETS:
         raise ValueError(f"unknown fault preset {key.fault!r}")
     _, sensor, device = FAULT_PRESETS[key.fault]
-    twin = build_twin(key.scenario, closed_loop=True)
+    battery_config = None
+    if key.battery_health:
+        from digital_twin.battery_model import BatteryModelConfig
+        spec = CATALOG[key.scenario]
+        battery_config = BatteryModelConfig(degradation=True, initial_soc_pct=spec["initial_soc_pct"],
+                                            capacity_kwh=spec["capacity_kwh"])
+    twin = build_twin(key.scenario, closed_loop=True, battery_config=battery_config)
     kwargs = {}
     if sensor is not None:
         kwargs.update(sensor_faults=sensor, on_bad_reading=key.policy)
     if device is not None:
         kwargs["device_faults"] = device
     return run_closed_loop(
-        twin, STRATEGIES[key.strategy][1], steps=CATALOG[key.scenario]["steps"], **kwargs
+        twin, STRATEGIES[key.strategy][1], steps=CATALOG[key.scenario]["steps"], collect_features=True, **kwargs
     )
 
 
