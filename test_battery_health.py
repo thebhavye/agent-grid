@@ -104,3 +104,18 @@ def test_health_dashboard_records_are_for_selected_run():
     assert len(records) == 288
     assert records[0]["battery_telemetry"]["before"]["health_pct"] == 95
     assert records[-1]["battery_telemetry"]["health_pct"] < 95
+
+
+
+def test_physics_basis_does_not_read_next_state_labels():
+    from copy import deepcopy
+    from battery_health.dataset import operation_row
+    config = BatteryModelConfig(degradation=True)
+    record = run_closed_loop(build_twin("clear_day", closed_loop=True, battery_config=config),
+                              hybrid_allocate, steps=1)[0]
+    original = operation_row(record, config)
+    changed = deepcopy(record)
+    changed["battery_telemetry"].update(soc_pct=99, health_pct=5, temperature_c=-15)
+    after = operation_row(changed, config)
+    for key in ("physics_loss_pct", "cycle_loss_pct", "calendar_loss_pct", "physics_temp_delta_c"):
+        assert after[key] == original[key]
