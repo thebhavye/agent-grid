@@ -14,7 +14,7 @@ This repository is private pending a planned patent filing.
 | 2 | LangGraph multi-agent bidding + arbiter | DONE: hybrid arbiter + deterministic graph with closed-loop record parity |
 | 3 | Synthetic dataset, digital twin + closed-loop evaluation | DONE: offline scenarios, paired hybrid vs baseline metrics |
 | 4 | LLM-generated allocation explanations | PARTIAL: facts-first explanations shipped; LLM renderer awaits a privacy decision (#59) |
-| 5 | PINN for battery SoH/thermal risk | planned (#69, #85) |
+| 5 | PINN for battery SoH/thermal risk | opt-in synthetic degradation data and empirical baseline (#69); PINN remains #85 |
 | 6 | Edge quantized LLM for fault interpretation | planned (#84); labelled fault data exists |
 | 7 | SHAP explainability | planned (#83) |
 
@@ -203,7 +203,8 @@ Main components (`digital_twin/`):
   −0.4%/°C derating above 25°C (crystalline-silicon STC assumption). Defaults: 20 m², 20%.
 - `battery_model.py` — stateful SOC with ~90% round-trip efficiency (0.949 each way), SOC clamped
   to [0, 100], plus a deliberately simple first-order thermal model. NOT the Phase 5 PINN; health
-  stays constant in this version.
+  stays constant by default. Opt-in synthetic degradation supports the #69
+  dataset and empirical baseline; it does not represent calibrated cell aging.
 - `ev_model.py` / `appliance_model.py` — scenario/state-based behaviour (NOT detailed electrical
   physics), reusing the generator's scenario patterns (overnight/midday/evening-topup) as live
   stateful models. Deterministic under a fixed seed.
@@ -231,6 +232,16 @@ Notes:
   hits the real Open-Meteo API.
 
 ## Current Progress
+
+### Battery Degradation Data
+
+Opt-in `BatteryModelConfig(degradation=True)` adds illustrative cycle/calendar
+aging without changing defaults. Generate deterministic multi-day closed-loop
+data and a held-out empirical baseline using
+`python -m battery_health.baseline --days 3 --seed 42 --output battery-output`.
+See [assumptions, schema and evaluation limits](battery_health/README.md).
+This is synthetic preparation data, not measured SoH, a PINN or a real-cell
+remaining-life prediction. Health does not yet alter capacity or bidding.
 
 ### Optional Grid Connection
 
