@@ -45,7 +45,8 @@ def test_selected_dashboard_run_uses_existing_telemetry():
     records = run(RunKey("heatwave", "baseline", battery_health=True))
     assert "battery_telemetry" not in records[0]
     assert records[-1]["battery_health_pct"] < 95
-    assert len(battery_steps(records, "heatwave")) == 288
+    assert len(battery_steps(records, "heatwave", seed=7)) == 288
+    assert set(battery_steps(records, "heatwave", seed=7).seed) == {7}
 
 
 def test_hot_high_c_rate_prediction_flags_risk(steps):

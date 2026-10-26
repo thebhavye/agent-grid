@@ -758,3 +758,25 @@ omitted/disabled/enabled). Catalog horizons include the 864-step three_days
 run. Enabled grid uses synthetic import/export caps 3/2 kW and prices 2/0.5.
 Summary: `docs/evaluations/default-parity.json`. The shared degradation model,
 dataset and baseline are byte-identical to main.
+
+### Windows benchmark and research CI follow-up
+
+The benchmark imports resource only inside its memory probe. Without resource,
+psutil's Windows peak_wset supplies peak process MiB; psutil is pinned in the
+optional edge requirements. Missing/unavailable memory methods produce null
+and a reason, rather than aborting the benchmark. Tests simulate resource
+being unavailable, including module reload, Windows peak memory and no method.
+This does not constitute the real GGUF demo-laptop benchmark still needed by #84.
+
+A second CI job installs research, CPU-only battery and dashboard dependencies,
+verifies torch has no CUDA build, runs the full offline suite and fails if
+its JUnit report contains any skipped tests. The light core CI job is retained.
+The dashboard telemetry adapter now requires an explicit seed; the dashboard
+passes the catalog's configured appliance seed. Research documentation leads
+with the result that the PINN loses to the empirical baseline on both targets.
+
+Default three_days dashboard check on this Linux cloud host (Streamlit AppTest,
+research panels off): scenario selection/run 1.339 seconds; cached slider rerun
+0.336 seconds. No exceptions over 864 steps. These measure Python/dashboard
+execution, not browser paint/network or performance on the Windows laptop.
+Recorded in docs/evaluations/dashboard-three-days.json.

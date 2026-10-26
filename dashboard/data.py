@@ -375,11 +375,11 @@ def comparison(scenario: str, fault: str = "none", policy: str = "hold_last") ->
 
 
 
-def battery_steps(records, scenario):
+def battery_steps(records, scenario, *, seed):
     """Map #69's existing runner telemetry to its daily-summary input schema."""
     rows = []
     for step, record in enumerate(records):
-        rows.append({"scenario": scenario, "seed": 42, "day": int(step * record["dt_min"] // 1440),
+        rows.append({"scenario": scenario, "seed": seed, "day": int(step * record["dt_min"] // 1440),
                      "dt_min": record["dt_min"], "power_kw": record["battery_kw"],
                      "health_pct": record["battery_health_pct"],
                      "temperature_c": record["battery_temperature_c"],

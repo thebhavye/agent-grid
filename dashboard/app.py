@@ -351,7 +351,7 @@ with overview:
         try:
             import pandas as pd
             from battery_health.pinn import daily_frame, thermal_risk
-            battery_frame = daily_frame(data.battery_steps(records, scenario))
+            battery_frame = daily_frame(data.battery_steps(records, scenario, seed=CATALOG[scenario]["appliance_seed"]))
             prediction = load_health_model().predict(battery_frame)
             st.line_chart(pd.DataFrame({"Predicted day-end SoH (%)": prediction[:, 0],
                                        "Twin day-end SoH (%)": battery_frame.end_health_pct}))

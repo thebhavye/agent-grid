@@ -93,3 +93,32 @@ def test_benchmark_only_counts_accepted_model_output(monkeypatch, capsys, accept
     else:
         assert report["tokens_per_second"] is None
         model.tokenize.assert_not_called()
+
+
+def test_benchmark_without_resource_uses_windows_peak(monkeypatch, capsys):
+    import json
+    import sys
+    from edge_llm import benchmark
+    monkeypatch.setitem(sys.modules, "resource", None)
+    import importlib
+    importlib.reload(benchmark)
+    monkeypatch.setitem(sys.modules, "psutil", Mock(Process=lambda: Mock(
+        memory_info=lambda: Mock(peak_wset=128 * 1024 ** 2))))
+    monkeypatch.setattr(sys, "argv", ["benchmark"])
+    benchmark.main()
+    report = json.loads(capsys.readouterr().out)
+    assert report["peak_rss_mib"] == 128
+    assert report["peak_memory_unavailable_reason"] is None
+
+
+def test_benchmark_memory_unavailable_does_not_crash(monkeypatch, capsys):
+    import json
+    import sys
+    from edge_llm import benchmark
+    monkeypatch.setitem(sys.modules, "resource", None)
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    monkeypatch.setattr(sys, "argv", ["benchmark"])
+    benchmark.main()
+    report = json.loads(capsys.readouterr().out)
+    assert report["peak_rss_mib"] is None
+    assert "unavailable" in report["peak_memory_unavailable_reason"]

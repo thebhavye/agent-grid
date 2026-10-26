@@ -1,5 +1,8 @@
 # Optional research modules
 
+The PINN performs worse than the empirical baseline on both daily targets in
+the held-out scenario. These experimental results do not show an improvement.
+
 Core simulation and tests need only `requirements.txt`. All examples below use
 saved scenario weather, fixed seeds and local computation. They make no API
 calls or automatic model downloads. Install extras in your virtual environment:
@@ -134,3 +137,6 @@ this cloud host has no GGUF file and cannot provide that measurement. The
 committed report records **fallback only**, with model and tokens/s null. Real
 model quality and laptop latency/memory remain an explicit acceptance gap for
 #84; the offline fake-model tests are not a substitute.
+
+On Windows, install `requirements-edge.txt` for psutil peak working-set measurement.
+If no peak-memory method is available, the benchmark reports null with a reason.
