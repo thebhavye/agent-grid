@@ -559,3 +559,15 @@ Remote tracing is explicitly disabled even when enabled in the environment.
 Tests compare exact full-day records for both allocators, seeds 1/7/42 and all
 three built-in EV scenarios, plus graph topology, roster changes, reset and faults.
 This wraps the measured #57 trade-offs; it does not claim improved outcomes.
+
+## Issue #66 - Paired closed-loop comparison plots
+
+Use two fresh, equivalent offline twins with unchanged hybrid/proportional
+allocators. Verify initial conditions, exogenous schedules and power balance
+before rendering. Plot actual load delivery (including base load and EV once),
+post-commit SOC at interval ends, targets/departures, per-interval unmet kWh,
+battery modes and score_run outcomes. Interval shading uses stairs and actual
+dt_min edges, including the final interval. Catalog scenarios retain their
+configured run length; factory inputs run 288 steps. Agg and finally-close
+keep the CLI headless and release figures even after a save error. No physics,
+policy, data or metrics are changed to improve the visual comparison.
