@@ -1,4 +1,4 @@
 # Optional; the rules-only advisor needs no extra dependencies.
-llama-cpp-python==0.3.16
+llama-cpp-python==0.3.36
 # Windows benchmark peak working-set measurement.
 psutil==7.1.3

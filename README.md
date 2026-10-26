@@ -15,7 +15,7 @@ This repository is private pending a planned patent filing.
 | 3 | Synthetic dataset, digital twin + closed-loop evaluation | DONE: offline scenarios, paired hybrid vs baseline metrics |
 | 4 | LLM-generated allocation explanations | PARTIAL: facts-first explanations shipped; LLM renderer awaits a privacy decision (#59) |
 | 5 | PINN for battery SoH/thermal risk | opt-in synthetic degradation data and empirical baseline (#69); optional daily PINN and same-split ablation (#85; baseline remains better) |
-| 6 | Edge quantized LLM for fault interpretation | planned (#84); labelled fault data exists |
+| 6 | Edge quantized LLM for fault interpretation | opt-in local GGUF advisor measured on the demo laptop (#84) |
 | 7 | SHAP explainability | planned (#83) |
 
 An interactive demo dashboard (Streamlit) is also implemented; see [Dashboard](#dashboard-demo-ui).
@@ -301,10 +301,42 @@ strategy and an optional fault to inject; the tabs show:
 - **Agents & decisions**: every agent's bid (priority, urgency, requested vs received) at
   the selected moment, with a plain-English explanation generated from the arbiter's rules
 - **Hybrid vs baseline**: all outcome metrics for both strategies on the same scenario
-- **Faults**: the affected steps and any sensor substitutions the runner made
+- **Faults**: the affected steps, any sensor substitutions the runner made, and Advisor
+  guidance per labelled fault event, labelled by source (`local_model` when a GGUF is
+  configured and the numeric guard accepts it, `fallback` otherwise)
 
 The data layer (`dashboard/data.py`) has no Streamlit dependency and is covered by
 `dashboard/test_data.py` in the normal offline test suite.
+
+## Local fault advisor (optional)
+
+The Faults tab includes an **Advisor** panel that turns labelled fault events into
+maintenance guidance. Without a model it uses deterministic rule-based advice. To
+enable local model guidance with no cloud API: download the small quantized model
+(`qwen2.5-0.5b-instruct-q4_k_m.gguf`, about 469 MiB, Apache-2.0) from
+[Qwen/Qwen2.5-0.5B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF)
+(verify the model card before downloading), keep it outside the repository
+(`*.gguf` is gitignored and weights are never committed), and point the
+environment at it read-only:
+
+```bash
+pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu   # prebuilt Windows CPU wheel; use plain pip install llama-cpp-python elsewhere
+set AGENTGRID_GGUF_MODEL=C:\Users\you\models\qwen2.5-0.5b-instruct-q4_k_m.gguf                      # absolute path, file is opened read-only
+python -m streamlit run dashboard/app.py
+```
+
+`llama-cpp-python` is pinned at 0.3.36 in `requirements-edge.txt` (`psutil` covers
+Windows peak-memory reporting in the benchmark). Load is lazy, cached once per
+dashboard session, and advice is guarded by the shared numeric check — any invented
+reading falls back to the rules. Measured on the demo laptop (Windows 11,
+i5-1334U, 4 generation threads, n_ctx 2048, about 1.4 GiB free RAM): load 1.06 s,
+advice 2.2 s (about 19 tokens/s at temperature 0), peak 543 MiB; accepted local
+advice on 2 of 4 dashboard fault presets, the other two fell back after the guard
+rejected invented numeric ranges. Full numbers: `docs/evaluations/fault-advisor-qwen2.5-0.5b-windows.json`;
+a 4B thinking-model candidate was measured and rejected (about 5 tokens/s, no final
+answer within a 1400-token budget). This advisor supports maintenance triage only;
+it is not a safety certification, and electrical or battery work belongs to
+qualified technicians.
 
 ## Visualization
 

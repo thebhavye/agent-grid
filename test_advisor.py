@@ -34,6 +34,24 @@ def test_local_model_is_optional_and_number_checked():
     assert advisor.advise(event()) == ADVICE["spike"]
 
 
+def test_thinking_blocks_and_step_numbering_are_stripped():
+    start = chr(60) + "think" + chr(62)
+    end = chr(60) + "/" + "think" + chr(62)
+    model = Mock(return_value={"choices": [{"text": start + "Plan draft with 9 notes."
+                                            + end + "Check the spike. Compare the observed 0.5 reading."}]})
+    advisor = FaultAdvisor(model=model)
+    assert advisor.advise(event()) == "Check the spike. Compare the observed 0.5 reading."
+    assert advisor.last_source == "local_model"
+
+
+def test_step_numbering_markers_are_not_invented_numbers():
+    model = Mock(return_value={"choices": [{"text": "1. Check the spike wire.\n"
+                                                   "2. Compare the observed 0.5 reading."}]})
+    advisor = FaultAdvisor(model=model)
+    assert advisor.advise(event()) == "Check the spike wire.\nCompare the observed 0.5 reading."
+    assert advisor.last_source == "local_model"
+
+
 def test_windows_are_contiguous_and_unmet_is_not_claimed_causal():
     records = run(RunKey("clear_day", "hybrid", "inverter_trip"))
     before = deepcopy(records)
