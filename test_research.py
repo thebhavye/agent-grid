@@ -97,3 +97,19 @@ def test_urgency_hook_rejects_invalid_outputs(value):
     with pytest.raises(ValueError, match="urgency_policy"):
         run_closed_loop(build_twin("clear_day", closed_loop=True), hybrid_allocate,
                         steps=1, urgency_policy=lambda name, features: value)
+
+
+def test_feature_capture_and_neutral_urgency_preserve_enabled_grid():
+    from simulation.grid import GridConfig
+    from simulation.metrics import score_run
+    config = GridConfig(enabled=True, import_limit_kw=3, export_limit_kw=2, tariff=[{
+        "start_min": 0, "end_min": 1440, "import_price_per_kwh": 2, "export_price_per_kwh": .5}])
+    original = run_closed_loop(build_twin("demo_sunny_home", closed_loop=True), hybrid_allocate,
+                               grid_config=config)
+    captured = run_closed_loop(build_twin("demo_sunny_home", closed_loop=True), hybrid_allocate,
+                               grid_config=config, collect_features=True,
+                               urgency_policy=lambda name, features: features["urgency"])
+    for record in captured:
+        record.pop("decision_features")
+    assert captured == original
+    assert score_run(captured) == score_run(original)

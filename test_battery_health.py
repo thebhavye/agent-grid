@@ -1,140 +1,63 @@
-"""Empirical degradation, closed-loop data and optional tiny PINN tests."""
-
-from dataclasses import replace
+"""PINN uses #69's unchanged schema, split and daily targets."""
 
 import numpy as np
-import pandas as pd
 import pytest
 
-from battery_health.dataset import EmpiricalBaseline, daily_summary, generate_battery_dataset
-from digital_twin.battery_model import BatteryModel, BatteryModelConfig
-from scenarios import build_twin
-from simulation.closed_loop import run_closed_loop
-from simulation.hybrid_arbiter import hybrid_allocate
-
-
-def test_degradation_off_preserves_records_and_metrics():
-    from simulation.metrics import score_run
-    old = run_closed_loop(build_twin("clear_day", closed_loop=True), hybrid_allocate)
-    explicit = run_closed_loop(build_twin("clear_day", closed_loop=True,
-                                          battery_config=BatteryModelConfig(degradation=False)), hybrid_allocate)
-    assert old == explicit
-    assert score_run(old) == score_run(explicit)
-    assert "battery_telemetry" not in old[0]
-
-
-def _loss(config, power=0):
-    model = BatteryModel(config)
-    start = model.health_pct
-    health = []
-    for _ in range(12):
-        # Alternating terminal power keeps SOC away from the clamps.
-        model.update(power if len(health) % 2 else -power, 5)
-        health.append(model.health_pct)
-    assert np.all(np.diff(health) <= 0)
-    return start - model.health_pct
-
-
-def test_aging_faster_at_higher_c_rate_temperature_and_soc():
-    base = BatteryModelConfig(degradation=True)
-    assert _loss(base, 6) > _loss(base, 1)
-    assert _loss(replace(base, ambient_temp_c=40), 1) > _loss(base, 1)
-    assert _loss(replace(base, initial_soc_pct=80)) > _loss(replace(base, initial_soc_pct=20))
-    assert _loss(replace(base, degradation=False), 6) == 0
+from battery_health.baseline import DEFAULT_SCENARIOS, fit_baseline
+from battery_health.dataset import generate_battery_dataset
 
 
 @pytest.fixture(scope="module")
-def dataset():
-    return generate_battery_dataset(days=2, seed=7)
+def steps():
+    return generate_battery_dataset(DEFAULT_SCENARIOS, 3, 42)
 
 
-def test_closed_loop_data_deterministic_multiday_and_monotonic(dataset):
-    pd.testing.assert_frame_equal(dataset, generate_battery_dataset(days=2, seed=7), check_exact=True)
-    assert len(dataset) == 3 * 2 * 288
-    assert len(daily_summary(dataset)) == 6
-    for _, group in dataset.groupby("scenario"):
-        assert np.all(np.diff(group.next_health_pct) <= 0)
-        assert np.all(np.diff(group.throughput_kwh) >= 0)
-        assert group.power_kw.abs().sum() > 0
-    assert (dataset.next_health_pct < dataset.health_pct).all()
-
-
-def test_empirical_baseline_heldout_error_is_reported(dataset):
-    training = dataset[dataset.scenario != "heatwave"]
-    heldout = dataset[dataset.scenario == "heatwave"]
-    baseline = EmpiricalBaseline().fit(training)
-    error = np.abs(baseline.predict(heldout) - heldout[["next_health_pct", "next_temperature_c"]].to_numpy()).mean()
-    assert error < 1e-10
-
-
-def test_tiny_pinn_reproducible_and_physics_ablation(dataset):
+def test_same_daily_split_targets_and_baseline(steps):
     pytest.importorskip("torch")
-    from battery_health.pinn import train
-    tiny = dataset.iloc[::15]
-    first = train(tiny, epochs=15)
-    second = train(tiny, epochs=15)
-    np.testing.assert_array_equal(first.predict(tiny), second.predict(tiny))
-    plain = train(tiny, epochs=15, physics_weight=0)
-    assert np.isfinite(first.predict(tiny)).all()
-    assert not np.array_equal(first.predict(tiny), plain.predict(tiny))
+    from battery_health.pinn import daily_frame, train
+    from battery_health.train import evaluate
+    daily = daily_frame(steps)
+    left, right = daily[daily.scenario != "heatwave"], daily[daily.scenario == "heatwave"]
+    baseline = fit_baseline(steps)
+    assert len(left) == baseline["train_days"] == 6
+    assert len(right) == baseline["test_days"] == 3
+    first, second = train(left, epochs=20), train(left, epochs=20)
+    np.testing.assert_array_equal(first.predict(right), second.predict(right))
+    result = evaluate(right, first.predict(right))
+    assert set(result) == {"health_mae_pct", "temperature_mae_c"}
+    assert np.isfinite(list(result.values())).all()
+    assert not np.array_equal(first.predict(right), train(left, epochs=20, physics_weight=0).predict(right))
 
 
-def test_hot_high_c_rate_case_raises_predicted_risk(dataset):
+def test_physics_targets_do_not_read_measured_health_or_temperature(steps):
     pytest.importorskip("torch")
-    from battery_health.pinn import thermal_risk, train
-    from battery_health.dataset import operation_row
-    config = BatteryModelConfig(degradation=True, ambient_temp_c=50, max_charge_rate_c=2)
-    model = BatteryModel(config)
-    before = {"soc_pct": model.soc_pct, "health_pct": model.health_pct,
-              "temperature_c": model.temperature_c}
-    state = model.update(24, 5, 50)
-    record = {"dt_min": 5, "battery_kw": 24, "battery_telemetry": {
-        "before": before, "soc_pct": state["soc_pct"], "health_pct": state["health_pct"],
-        "temperature_c": state["temperature_c"], "ambient_temp_c": 50}}
-    frame = pd.DataFrame([operation_row(record, config)])
-    predicted = train(dataset.iloc[::15], epochs=15).predict(frame)
-    assert "high_temperature" in thermal_risk(predicted[0, 1], 50, 5)
-    assert "rapid_temperature_rise" in thermal_risk(40, 30, 5)
-    assert thermal_risk(30, 30, 5) == []
+    from battery_health.pinn import daily_frame
+    original = daily_frame(steps)
+    changed = steps.copy()
+    changed["health_pct"], changed["temperature_c"] = 1, -15
+    after = daily_frame(changed)
+    np.testing.assert_array_equal(original[["physics_loss_pct", "physics_peak_c"]],
+                                  after[["physics_loss_pct", "physics_peak_c"]])
 
 
-def test_health_dashboard_records_are_for_selected_run():
-    from dashboard.data import RunKey, run
+def test_selected_dashboard_run_uses_existing_telemetry():
+    from dashboard.data import RunKey, battery_steps, run
     records = run(RunKey("heatwave", "baseline", battery_health=True))
-    assert len(records) == 288
-    assert records[0]["battery_telemetry"]["before"]["health_pct"] == 95
-    assert records[-1]["battery_telemetry"]["health_pct"] < 95
+    assert "battery_telemetry" not in records[0]
+    assert records[-1]["battery_health_pct"] < 95
+    assert len(battery_steps(records, "heatwave")) == 288
 
 
-
-def test_physics_basis_does_not_read_next_state_labels():
-    from copy import deepcopy
-    from battery_health.dataset import operation_row
-    config = BatteryModelConfig(degradation=True)
-    record = run_closed_loop(build_twin("clear_day", closed_loop=True, battery_config=config),
-                              hybrid_allocate, steps=1)[0]
-    original = operation_row(record, config)
-    changed = deepcopy(record)
-    changed["battery_telemetry"].update(soc_pct=99, health_pct=5, temperature_c=-15)
-    after = operation_row(changed, config)
-    for key in ("physics_loss_pct", "cycle_loss_pct", "calendar_loss_pct", "physics_temp_delta_c"):
-        assert after[key] == original[key]
-
-
-
-@pytest.mark.parametrize("soc,power", [(100, 6), (0, -6)])
-def test_cycle_fade_uses_transferred_energy_at_soc_clamps(soc, power):
-    battery = BatteryModel(BatteryModelConfig(
-        degradation=True, initial_soc_pct=soc, calendar_fade_pct_per_hour=0))
-    battery.update(power, 5)
-    assert battery.health_pct == battery.config.initial_health_pct
-
-
-
-@pytest.mark.parametrize("dt", [0, -5, float("nan"), float("inf")])
-def test_invalid_degradation_timestep_does_not_mutate_state(dt):
-    battery = BatteryModel(BatteryModelConfig(degradation=True))
-    before = vars(battery).copy()
-    with pytest.raises(ValueError, match="positive timestep"):
-        battery.update(1, dt, 40)
-    assert vars(battery) == before
+def test_hot_high_c_rate_prediction_flags_risk(steps):
+    pytest.importorskip("torch")
+    from battery_health.pinn import daily_frame, thermal_risk, train
+    hot = steps.copy()
+    hot["initial_temperature_c"] = 50
+    hot["ambient_temperature_c"] = 50
+    hot["temperature_c"] = 50.5
+    hot["power_kw"] = 12
+    hot["c_rate"] = 1
+    daily = daily_frame(hot)
+    predicted = train(daily, epochs=200).predict(daily)
+    assert "high_temperature" in thermal_risk(predicted[0, 1], predicted[0, 1], 1440)
+    assert "rapid_temperature_rise" in thermal_risk(40, 30, 5)

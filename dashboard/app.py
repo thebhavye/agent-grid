@@ -51,8 +51,8 @@ def load_surrogate():
 @st.cache_resource(show_spinner="Training battery-health model on saved scenarios…")
 def load_health_model():
     from battery_health.dataset import generate_battery_dataset
-    from battery_health.pinn import train
-    return train(generate_battery_dataset(("clear_day", "monsoon_cloudy"), days=3))
+    from battery_health.pinn import daily_frame, train
+    return train(daily_frame(generate_battery_dataset(("demo_sunny_home", "degraded_battery"), 3, 42)))
 
 
 
@@ -350,27 +350,18 @@ with overview:
         st.subheader("Battery health")
         try:
             import pandas as pd
-            from battery_health.dataset import operation_row
-            from battery_health.pinn import thermal_risk
-            from digital_twin.battery_model import BatteryModelConfig
-            config = BatteryModelConfig(degradation=True, capacity_kwh=CATALOG[scenario]["capacity_kwh"])
-            throughput = 0.0
-            rows = []
-            for item in records:
-                rows.append(operation_row(item, config, throughput))
-                throughput += abs(item["battery_kw"]) * item["dt_min"] / 60
-            battery_frame = pd.DataFrame(rows)
+            from battery_health.pinn import daily_frame, thermal_risk
+            battery_frame = daily_frame(data.battery_steps(records, scenario))
             prediction = load_health_model().predict(battery_frame)
-            chart = pd.DataFrame({"Time": frame.time, "Predicted SoH (%)": prediction[:, 0],
-                                  "Twin SoH (%)": battery_frame.next_health_pct}).set_index("Time")
-            st.line_chart(chart)
-            temp_chart = pd.DataFrame({"Time": frame.time, "Predicted temperature (°C)": prediction[:, 1],
-                                      "Twin temperature (°C)": battery_frame.next_temperature_c}).set_index("Time")
-            st.line_chart(temp_chart)
-            selected = battery_frame.iloc[step]
-            flags = thermal_risk(prediction[step, 1], selected.temperature_c, selected.dt_min)
-            st.write("Risk flags at selected moment: " + (", ".join(flags) if flags else "none"))
-            st.caption("Experimental one-step predictions conditioned on observed state; "
-                       "assumed aging coefficients and demonstration thresholds, not validated battery diagnostics.")
+            st.line_chart(pd.DataFrame({"Predicted day-end SoH (%)": prediction[:, 0],
+                                       "Twin day-end SoH (%)": battery_frame.end_health_pct}))
+            st.line_chart(pd.DataFrame({"Predicted daily peak (°C)": prediction[:, 1],
+                                       "Twin daily peak (°C)": battery_frame.peak_temperature_c}))
+            selected_day = min(int(frame.minute.iloc[step] // 1440), len(prediction) - 1)
+            peak = prediction[selected_day, 1]
+            flags = thermal_risk(peak, peak, 1440)
+            st.write("Predicted daily peak risk: " + (", ".join(flags) if flags else "none"))
+            st.caption("Conditional daily fits on the selected run's operating exposures; "
+                       "not forecasts of unknown usage or validated battery diagnostics.")
         except ImportError:
             st.info("Install requirements-battery.txt for battery-health predictions.")

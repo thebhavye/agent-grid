@@ -372,3 +372,22 @@ def comparison(scenario: str, fault: str = "none", policy: str = "hold_last") ->
          else hybrid[key] - baseline[key]}
         for key in METRICS
     ])
+
+
+
+def battery_steps(records, scenario):
+    """Map #69's existing runner telemetry to its daily-summary input schema."""
+    rows = []
+    for step, record in enumerate(records):
+        rows.append({"scenario": scenario, "seed": 42, "day": int(step * record["dt_min"] // 1440),
+                     "dt_min": record["dt_min"], "power_kw": record["battery_kw"],
+                     "health_pct": record["battery_health_pct"],
+                     "temperature_c": record["battery_temperature_c"],
+                     "ambient_temperature_c": record["ambient_temperature_c"],
+                     "c_rate": record["battery_c_rate"],
+                     "throughput_kwh": record["battery_throughput_kwh"],
+                     "cycle_exposure": record["battery_cycle_exposure"],
+                     "calendar_exposure": record["battery_calendar_exposure"],
+                     "initial_health_pct": record["battery_initial_health_pct"],
+                     "initial_temperature_c": record["battery_initial_temperature_c"]})
+    return pd.DataFrame(rows)

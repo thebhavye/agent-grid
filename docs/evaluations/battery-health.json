@@ -1,24 +1,35 @@
 {
-  "heldout": "heatwave, seed 13, three days",
-  "training_rows": 1728,
+  "heldout": "heatwave, seed 42, three days",
+  "training_days": 6,
+  "targets": [
+    "end_health_pct",
+    "peak_temperature_c"
+  ],
   "epochs": 400,
   "baseline": {
-    "soh_mae_pct": 5.921189464667501e-16,
-    "temperature_mae_c": 8.635067969306773e-17,
-    "next_day_soh_mae_pct": 1.7053025658242404e-13,
-    "daily_peak_temperature_mae_c": 0.0
+    "held_out_scenario": "heatwave",
+    "train_days": 6,
+    "test_days": 3,
+    "health_mae_pct": 1.2789769243681803e-13,
+    "temperature_mae_c": 0.41239561050337414,
+    "health_coefficients": [
+      0.00019999999998215987,
+      0.0010000000008679251
+    ],
+    "temperature_coefficients": [
+      0.04969459763761666,
+      -0.001127491617960663,
+      1.245548501101574,
+      0.05331340863734378
+    ]
   },
   "pinn": {
-    "soh_mae_pct": 6.8724534758837465e-06,
-    "temperature_mae_c": 0.10579409758899859,
-    "next_day_soh_mae_pct": 0.0019448583067808538,
-    "daily_peak_temperature_mae_c": 0.015466317534446716
+    "health_mae_pct": 0.00028111483239475393,
+    "temperature_mae_c": 11.320213317645612
   },
   "without_physics": {
-    "soh_mae_pct": 6.867608795046175e-06,
-    "temperature_mae_c": 0.11407207317142062,
-    "next_day_soh_mae_pct": 0.0019714141738849853,
-    "daily_peak_temperature_mae_c": 0.0302180474003156
+    "health_mae_pct": 0.0002876895235128056,
+    "temperature_mae_c": 11.327164967629336
   },
-  "elapsed_seconds": 2.599662223999985
+  "elapsed_seconds": 2.4036936319999995
 }

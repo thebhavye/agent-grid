@@ -1,0 +1,16 @@
+{
+  "base_commit": "4d5ee3a",
+  "pairs": 48,
+  "matched": true,
+  "modes": [
+    "grid omitted",
+    "grid disabled",
+    "grid enabled: import cap 3 kW, export cap 2 kW"
+  ],
+  "strategies": [
+    "hybrid",
+    "proportional"
+  ],
+  "horizon": "catalog step counts, including 864-step three_days",
+  "combined_sha256": "c914825f1988d0cec25c27fc2a9fc822d79c1dd0c8330d9ceec9766f4463bb43"
+}

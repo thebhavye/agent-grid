@@ -101,10 +101,6 @@ def results_markdown(frame):
     return "\n".join(lines)
 
 
-if __name__ == "__main__":
-    print(results_markdown(compare()))
-
-
 def compare_urgency(policy, seeds=(1, 7, 42), scenarios=("clear_day", "monsoon_cloudy", "heatwave")):
     """Pair an opt-in urgency variant with unchanged hybrid urgency.
 
@@ -133,3 +129,7 @@ def compare_urgency(policy, seeds=(1, 7, 42), scenarios=("clear_day", "monsoon_c
                         for key in METRICS})
             rows.append(row)
     return pd.DataFrame(rows)
+
+
+if __name__ == "__main__":
+    print(results_markdown(compare()))

@@ -690,46 +690,38 @@ justify promotion. The run count is small, step rows are correlated, and
 permutation spread is not a run-level confidence interval. All rankings and
 paired metrics are in `docs/evaluations/feature-selection.json`.
 
-### #85: battery dataset, empirical baseline and PINN ablation
+### #85: daily PINN on the merged #69 battery API
 
-Minimum #69 prerequisites are included: opt-in diagnostic degradation, multi-day
-closed-loop data, daily summaries, and an empirical least-squares baseline.
-Health never scales dispatch or nominal capacity in this experiment. The thermal
-recurrence is unchanged. Coefficients are **assumptions**, not calibrated cell
-chemistry: cycle fade 0.02 percentage points/EFC (absolute terminal throughput /
-twice nominal capacity), calendar fade 0.0001 percentage points/hour, linear
-C-rate coefficient 1, linear mean-SOC coefficient 1, reference temperature 25 °C,
-and doubling per 10 °C. All are named `BatteryModelConfig` fields. Higher C-rate,
-temperature and SOC accelerate fade in paired tests. Default degradation off
-matches original records/scores, checked against the pre-change main commit.
-These coefficients have no measured source and must not be used for lifetime
-claims. No remaining-useful-life target is selected.
+This PR uses #94's unmodified degradation model, dataset, summarize_days,
+fit_baseline and existing battery_* runner fields. It adds no second aging
+model, dataset schema or telemetry contract. The CPU network predicts daily
+end_health_pct and peak_temperature_c conditional on the day's operation.
+Inputs match the baseline's combined health/thermal inputs: start health,
+start temperature, mean ambient, maximum C-rate, cycle/calendar exposures.
+Physics losses use #69's aging coefficients and the existing first-order
+thermal recurrence driven by known power/ambient, never measured target
+health or temperature. These are conditional fits, not forecasts of unknown
+usage. The thermal recurrence assumes the catalog's default thermal config.
 
-The small CPU network predicts one-step health loss and temperature change from
-operation features; its loss includes empirical aging/thermal residuals plus a
-monotonic-health penalty. Training uses clear_day/monsoon_cloudy, three days,
-seed 42. Holdout uses heatwave, three days, seed 13. Same-network, same-seed
-ablation has zero physics weight. These noise-free labels largely duplicate
-the physics targets, limiting what the ablation establishes. Baseline/physics
-inputs are derived from pre-step state and applied power, never next-state labels.
+All three models use the same generate_battery_dataset(DEFAULT_SCENARIOS, 3,
+42) output. Train: demo_sunny_home and degraded_battery (six daily rows).
+Holdout: heatwave (three daily rows). The baseline below is fit_baseline itself.
+The same-network ablation uses the same seed and zero physics weight.
 
-| Model | SoH MAE (pp, step) | Temperature MAE (°C, step) | Day-end SoH MAE (pp) | Daily peak temperature MAE (°C) |
-|---|---|---|---|---|
-| Empirical baseline | 5.9211895e-16 | 8.635068e-17 | 1.7053026e-13 | 0 |
-| PINN | 6.8724535e-06 | 0.1057941 | 0.0019448583 | 0.015466318 |
-| Without physics | 6.8676088e-06 | 0.11407207 | 0.0019714142 | 0.030218047 |
+| Model | Day-end health MAE (pp) | Daily peak temperature MAE (°C) |
+|---|---|---|
+| Empirical baseline | 1.27897692e-13 | 0.412395611 |
+| PINN | 0.000281114832 | 11.3202133 |
+| Without physics | 0.000287689524 | 11.327165 |
 
-The PINN **does not beat the empirical baseline**. Baseline residuals are near
-floating-point precision because it fits the generating equations. Training
-both networks plus dataset generation took 2.60 seconds on this cloud CPU;
-weights reproduce via `python -m battery_health.train`, so no weights are
-committed. Daily health errors accumulate one-step losses from observed state;
-temperatures are also conditioned on observed state, not autonomous forecasts.
-The opt-in dashboard panel shows the selected run's predicted/twin trajectories
-and labelled risks. Thresholds (45 °C or 1 °C/min rise) are demonstration
-assumptions, not manufacturer limits. A constructed hot high-C-rate prediction
-and separate rapid-rise case exercise the flags. No real-cell accuracy claim.
-Full report: `docs/evaluations/battery-health.json`.
+The PINN does not beat the baseline on either target. Six training days are
+very limited evidence and the heatwave extrapolation is poor. No superiority
+or real-cell accuracy claim is made. Full report and reproduction command:
+`docs/evaluations/battery-health.json`, `python -m battery_health.train`.
+The dashboard shows daily predictions for the selected run using the existing
+battery record fields. Demonstration thresholds remain 45 °C or 1 °C/min;
+the daily forecast flags peak temperature, not an inferred instantaneous rise.
+Weights remain reproducible rather than committed.
 
 ### #84: local fault advice and remaining measurement gap
 
@@ -751,12 +743,18 @@ not be considered fully closed on the strength of fake-model tests alone.
 
 ### PR #95 review follow-up
 
-Cache the local advisor resource by model path and cache advice together with
-its source by event facts, so dashboard widget reruns do not reload weights or
-repeat inference. Serialize access to the shared model to keep llama.cpp calls
-and source attribution consistent across concurrent sessions. Benchmark token
-counts and throughput are null whenever rule-based fallback is returned, even
-if a model loaded successfully; peak RSS uses the platform's native units.
-Diagnostic cycle fade uses actual transferred terminal energy at SOC clamps,
-and invalid degradation timesteps are rejected before state mutation. These
-changes leave default simulation behavior unchanged.
+The local advisor and per-event advice/source remain cached across dashboard
+reruns. Shared model calls are serialized. Fallback responses have null model
+token metrics, and RSS conversion handles macOS units.
+
+Rebased onto current main after #92/#93/#94 merged. The existing #66, #61 and
+#69 decision sections are preserved verbatim before this PR's appended sections.
+The previous duplicate battery API and one-step results are replaced by #94's
+API and the daily comparison above. compare_urgency now precedes the CLI block.
+
+Default-parity recheck against current main `4d5ee3a`: all 48 complete
+record/metric hashes match (eight catalog scenarios, both allocators, grid
+omitted/disabled/enabled). Catalog horizons include the 864-step three_days
+run. Enabled grid uses synthetic import/export caps 3/2 kW and prices 2/0.5.
+Summary: `docs/evaluations/default-parity.json`. The shared degradation model,
+dataset and baseline are byte-identical to main.

@@ -1,6 +1,6 @@
 # AgentGrid
 
-Multi-agent simulated smart-home microgrid — urgency bidding, hybrid arbitration and closed-loop evaluation, orchestrated with LangGraph. PINN battery health, SHAP explainability and an edge LLM are planned (see Roadmap).
+Multi-agent simulated smart-home microgrid — urgency bidding, hybrid arbitration and closed-loop evaluation, orchestrated with LangGraph. Optional daily PINN, SHAP and local fault-advisor experiments are documented in [research modules](docs/research.md).
 
 AgentGrid is a simulated smart-home microgrid where autonomous agents (solar, battery, EV, appliances) score their own power urgency and a shared allocator arbitrates limited solar power between them.
 
@@ -14,7 +14,7 @@ This repository is private pending a planned patent filing.
 | 2 | LangGraph multi-agent bidding + arbiter | DONE: hybrid arbiter + deterministic graph with closed-loop record parity |
 | 3 | Synthetic dataset, digital twin + closed-loop evaluation | DONE: offline scenarios, paired hybrid vs baseline metrics |
 | 4 | LLM-generated allocation explanations | PARTIAL: facts-first explanations shipped; LLM renderer awaits a privacy decision (#59) |
-| 5 | PINN for battery SoH/thermal risk | opt-in synthetic degradation data and empirical baseline (#69); PINN remains #85 |
+| 5 | PINN for battery SoH/thermal risk | opt-in synthetic degradation data and empirical baseline (#69); optional daily PINN and same-split ablation (#85; baseline remains better) |
 | 6 | Edge quantized LLM for fault interpretation | planned (#84); labelled fault data exists |
 | 7 | SHAP explainability | planned (#83) |
 
@@ -325,3 +325,5 @@ Run `python viz/plot_day.py --seed 42` to save `day_plot.png` with solar vs allo
 The [demo script and readiness checklist](docs/demo-video.md) covers a 5-6 minute
 offline walkthrough, dependency gates, fresh-environment checks and the manual
 record/upload steps. It does not claim a video has been recorded or uploaded.
+
+Optional SHAP, local fault-advisor and urgency feature-selection setup and measured limits: [research modules](docs/research.md).

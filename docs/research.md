@@ -79,39 +79,31 @@ urgency on fresh twins, using existing initial-state/schedule fairness checks,
 scoring and power-balance validation. Seeds 5/19/31 are separate from ranking.
 Results are mixed; **default agent formulas remain unchanged**.
 
-## Battery health (#85 and minimum #69 prerequisites)
+## Battery health (#85)
 
-`BatteryModelConfig(degradation=True)` opts into diagnostic empirical cycle and
-calendar fade. Every coefficient is named and explicitly an assumption in
-`battery_model.py`; none is presented as measured cell chemistry. Health does
-not change nominal capacity, dispatch or arbiter behavior. With degradation off,
-records and scores match the original code. The existing first-order thermal
-model is unchanged.
+The PINN builds on the merged #69 API without changing its aging physics,
+dataset schema, baseline or runner telemetry. See [battery documentation](../battery_health/README.md)
+for coefficient assumptions and columns. `daily_frame` uses `summarize_days`
+and adds physics targets from known operation; they do not read measured
+health/temperature labels. Its thermal recurrence assumes default catalog
+thermal parameters.
 
-`generate_battery_dataset(scenarios, days, seed)` produces per-step closed-loop
-rows with pre/post SOC, signed terminal power, C-rate, cumulative throughput,
-cell/ambient temperature and health. `daily_summary(frame)` produces day-end
-health and peak temperature. Columns and units are documented in its docstring.
-Save locally with `frame.to_csv('outputs/battery.csv', index=False)`. Outputs and
-weights are ignored by git. Default dataset covers three scenarios and three
-days each. No static open-loop SOC curve is used.
+`python -m battery_health.train` calls the unchanged `generate_battery_dataset`
+with DEFAULT_SCENARIOS, three days and seed 42. PINN, no-physics ablation and
+`fit_baseline` use the same data, train scenarios (demo_sunny_home,
+degraded_battery), held-out scenario (heatwave), and targets (day-end health,
+daily peak temperature). Inputs combine the baseline's health and thermal
+features. These fits condition on the day's actual operating exposures; they
+are not autonomous forecasts. Six training rows are particularly limited.
+The PINN loses to the empirical baseline on both targets; the full numbers
+are in `docs/evaluations/battery-health.json` and `decisions.md`.
 
-The baseline fits least squares on the same empirical aging and thermal terms.
-The small CPU network predicts one-step health loss and temperature change,
-with data loss plus discrete aging/thermal residuals and a penalty for increasing
-health. The report compares it with the same network/seed without physics loss.
-Training uses clear/cloudy, three days, seed 42; holdout uses heatwave, three days,
-seed 13. Day-end health errors accumulate one-step predicted losses from the
-observed start state; temperature predictions use observed previous state.
-These are **not autonomous multi-day forecasts**. Physics targets largely
-repeat the noise-free simulated labels; the empirical baseline has an inherent
-advantage and the PINN does not beat it. No real-cell predictive claim is made.
-Weights reproduce in seconds on this host, so none are committed.
-
-The **Battery health experiment** dashboard toggle enables telemetry for the
-selected run and shows predicted/twin health and temperature trends, with risk
-flags at the selected moment. Demonstration warning thresholds are 45 °C or
-1 °C/min rise. They are assumptions, not manufacturer safety thresholds.
+The Battery health experiment dashboard uses existing battery_* records for
+the selected run and shows daily health/peak-temperature fits. Predicted peak
+risk uses a demonstration 45 °C threshold, not an instantaneous rate estimate.
+The separate thermal-risk helper supports 1 °C/min rise warnings. Neither
+threshold is a manufacturer safety limit. No weights or real-cell accuracy
+claims are committed.
 
 ## Local maintenance advisor (#84)
 

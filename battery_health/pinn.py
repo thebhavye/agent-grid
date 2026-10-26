@@ -1,17 +1,44 @@
-"""Small CPU network with empirical aging and first-order thermal residuals.
-
-These are simplified twin relations, not validated electrochemical physics.
-Torch is imported only when this optional module is explicitly requested.
-"""
+"""Optional daily PINN using #69's dataset, targets and operating exposures."""
 
 import numpy as np
 import torch
 from torch import nn
 
-INPUTS = ("soc_pct", "c_rate", "throughput_kwh", "temperature_c", "ambient_temp_c",
-          "health_pct", "power_kw", "dt_min")
-SCALES = np.array([100, 1, 100, 50, 50, 100, 12, 5], dtype=np.float32)
-LOSS_SCALE = 0.0001
+from battery_health.dataset import summarize_days
+from digital_twin.battery_model import BatteryModelConfig
+
+INPUTS = ("start_health_pct", "start_temperature_c", "mean_ambient_c", "max_c_rate",
+          "cycle_exposure", "calendar_exposure")
+SCALES = np.array([100, 50, 50, 1, 100, 1], dtype=np.float32)
+LOSS_SCALE = .01
+
+
+def daily_frame(steps):
+    """Use existing daily targets; physics targets use known operation only.
+
+    Both models are conditional fits on the day's operating exposures, not
+    forecasts of unknown usage. Thermal physics replays the existing first-
+    order recurrence from initial temperature, power and ambient readings.
+    """
+    daily = summarize_days(steps)
+    cfg = BatteryModelConfig()
+    peaks = {}
+    for (scenario, seed), rows in steps.groupby(["scenario", "seed"], sort=True):
+        temperature = float(rows.iloc[0].initial_temperature_c)
+        for day, group in rows.groupby("day", sort=True):
+            peak = -float("inf")
+            for row in group.itertuples():
+                efficiency = cfg.charge_efficiency if row.power_kw >= 0 else cfg.discharge_efficiency
+                decay = np.exp(-row.dt_min / 60 / (cfg.thermal_capacity * cfg.thermal_resistance))
+                temperature = np.clip(row.ambient_temperature_c
+                    + (temperature - row.ambient_temperature_c) * decay
+                    + abs(row.power_kw) * (1 - efficiency) * cfg.thermal_resistance * (1 - decay), -20, 60)
+                peak = max(peak, temperature)
+            peaks[scenario, seed, day] = peak
+    daily["physics_peak_c"] = [peaks[r.scenario, r.seed, r.day] for r in daily.itertuples()]
+    daily["physics_loss_pct"] = (daily.cycle_exposure * cfg.cycle_fade_pct_per_kwh
+                                  + daily.calendar_exposure * cfg.calendar_fade_pct_per_day)
+    return daily
 
 
 class BatteryPINN(nn.Module):
@@ -25,9 +52,9 @@ class BatteryPINN(nn.Module):
 
     def predict(self, frame):
         with torch.no_grad():
-            delta = self(_inputs(frame)).numpy()
-        return np.column_stack((frame.health_pct - delta[:, 0] * LOSS_SCALE,
-                                frame.temperature_c + delta[:, 1]))
+            output = self(_inputs(frame)).numpy()
+        return np.column_stack((frame.start_health_pct - output[:, 0] * LOSS_SCALE,
+                                output[:, 1] * 50))
 
 
 def _inputs(frame):
@@ -35,23 +62,21 @@ def _inputs(frame):
 
 
 def train(frame, *, seed=42, epochs=400, physics_weight=1.0):
-    """Fixed-seed full-batch training; zero physics weight gives the ablation."""
+    """Train on daily rows; zero physics weight gives the same-network ablation."""
     torch.set_num_threads(1)
     torch.manual_seed(seed)
     model = BatteryPINN()
     optimizer = torch.optim.Adam(model.parameters(), lr=.01)
     inputs = _inputs(frame)
-    target = torch.tensor(np.column_stack(((frame.health_pct - frame.next_health_pct) / LOSS_SCALE,
-                                          frame.next_temperature_c - frame.temperature_c)), dtype=torch.float32)
+    target = torch.tensor(np.column_stack(((frame.start_health_pct - frame.end_health_pct) / LOSS_SCALE,
+                                          frame.peak_temperature_c / 50)), dtype=torch.float32)
     physics = torch.tensor(np.column_stack((frame.physics_loss_pct / LOSS_SCALE,
-                                           frame.physics_temp_delta_c)), dtype=torch.float32)
+                                           frame.physics_peak_c / 50)), dtype=torch.float32)
     for _ in range(epochs):
         optimizer.zero_grad()
         predicted = model(inputs)
-        data_loss = (predicted - target).square().mean()
-        residual = (predicted - physics).square().mean()
-        monotonic = torch.relu(-predicted[:, 0]).square().mean()
-        loss = data_loss + physics_weight * (residual + monotonic)
+        loss = (predicted - target).square().mean() + physics_weight * (
+            (predicted - physics).square().mean() + torch.relu(-predicted[:, 0]).square().mean())
         loss.backward()
         optimizer.step()
     model.eval()
