@@ -10,6 +10,7 @@ METRICS = (
     "curtailed_solar_kwh", "battery_reserve_violation_steps",
     "battery_charge_kwh", "battery_discharge_kwh", "energy_balance_max_error_kw",
 )
+GRID_METRICS = ("grid_import_kwh", "grid_export_kwh", "net_cost", "self_consumption_pct")
 
 
 def score_run(records) -> dict:
@@ -23,6 +24,10 @@ def score_run(records) -> dict:
     Reserve comparisons allow 1e-9 percentage points of floating-point noise.
     """
     result = dict.fromkeys(METRICS, 0.0)
+    grid_totals = dict.fromkeys(GRID_METRICS, 0.0)
+    solar_kwh = 0.0
+    solar_offsite_kwh = 0.0
+    grid_enabled = False
     for record in records:
         dt = float(record["dt_min"])
         if not math.isfinite(dt) or dt <= 0:
@@ -53,8 +58,23 @@ def score_run(records) -> dict:
         actual_load = (sum(record["appliance_served_kw"].values())
                        + record["ev_applied_kw"]
                        + record["agents"]["household_base_load"]["allocated_kw"])
-        error = abs(record["solar_kw"] - battery - actual_load - record["curtailed_kw"])
+        imported = record.get("grid_import_kw", 0.0)
+        exported = record.get("grid_export_kw", 0.0)
+        if "grid_import_kw" in record:
+            grid_enabled = True
+            grid_totals["grid_import_kwh"] += imported * hours
+            grid_totals["grid_export_kwh"] += exported * hours
+            grid_totals["net_cost"] += record["import_cost"] - record["export_credit"]
+        solar_kwh += record["solar_kw"] * hours
+        solar_offsite_kwh += (exported + record["curtailed_kw"]) * hours
+        error = abs(record["solar_kw"] + imported - battery - actual_load
+                    - exported - record["curtailed_kw"])
         if not math.isfinite(error):
             raise ValueError("non-finite power balance in record")
         result["energy_balance_max_error_kw"] = max(result["energy_balance_max_error_kw"], error)
+    if grid_enabled:
+        grid_totals["self_consumption_pct"] = (
+            100 * max(0.0, solar_kwh - solar_offsite_kwh) / solar_kwh if solar_kwh else 0.0
+        )
+        result.update(grid_totals)
     return result

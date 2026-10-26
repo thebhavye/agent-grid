@@ -243,6 +243,31 @@ See [assumptions, schema and evaluation limits](battery_health/README.md).
 This is synthetic preparation data, not measured SoH, a PINN or a real-cell
 remaining-life prediction. Health does not yet alter capacity or bidding.
 
+### Optional Grid Connection
+
+Grid operation is off by default. Pass `grid_config=GridConfig(...)` to
+`run_closed_loop` (or the graph runner) to import for unmet loads and export
+otherwise curtailed solar. Battery charging remains solar-only. Imports are
+allocated against remaining demand by the same supplied allocator, preserving
+its priority policy. Existing records and metrics are unchanged when disabled.
+
+```python
+from simulation.grid import GridConfig
+
+# SYNTHETIC test values in currency-free units; not a real residential tariff.
+grid = GridConfig(enabled=True, import_limit_kw=3, export_limit_kw=2, tariff=[
+    {"start_min": 0, "end_min": 1440,
+     "import_price_per_kwh": 2, "export_price_per_kwh": 0.5},
+])
+```
+
+Tariffs cover the day exactly once, use exclusive ends, and may wrap midnight.
+An interval is priced at its start band. Enabled run metrics additionally report
+import/export kWh, net cost and solar self-consumption (zero for no solar).
+Self-consumption includes solar stored in the battery and excludes exported or
+curtailed solar; it is not a household self-sufficiency percentage. An actual
+demo tariff and export rules still require an owner-supplied authoritative source.
+
 - `agents/`: Solar, Battery, EV and Appliance agents turn their state into a
   validated bid (`demand_kw`, `urgency`); the battery also offers discharge supply.
 - `simulation/`: the hybrid arbiter (priority 1, then 2, then urgency bands), the
@@ -282,6 +307,16 @@ The data layer (`dashboard/data.py`) has no Streamlit dependency and is covered 
 `dashboard/test_data.py` in the normal offline test suite.
 
 ## Visualization
+
+Run `python viz/plot_comparison.py --scenario clear_day --output comparison.png`
+for a paired **closed-loop** comparison. All saved scenario names are supported,
+including `overnight_ev_cloudy` and the 864-step `three_days`. Panels show solar
+and actual load delivery, battery SOC and modes, EV SOC/targets/departures with
+full-interval plug-in shading, unmet energy, and outcome metrics. The two fresh
+twins must have identical initial conditions and exogenous schedules. SOC is
+shown at interval ends; unmet energy uses each record's actual timestep.
+`plot_comparison(fresh_twin_factory, save_path=...)` also accepts a factory
+for a 288-step experiment. Tests: `python -m pytest viz/ -q`.
 
 Run `python viz/plot_day.py --seed 42` to save `day_plot.png` with solar vs allocated power, allocations by agent group, and dataset battery/EV SOC with EV plug-in shading. SOC comes from the static dataset, not allocation feedback. Run the headless tests with `python -m pytest viz/test_plot_day.py`.
 
