@@ -580,3 +580,15 @@ metrics: import/export energy, net cost and on-site solar use (including storage
 excluding exports/curtailment). Disabled records and the original metrics remain
 exactly unchanged. Shared runner phases preserve graph parity. This implements
 the exported-surplus revisit from issue #5 without changing off-grid defaults.
+
+## Issue #66 - Paired closed-loop comparison plots
+
+Use two fresh, equivalent offline twins with unchanged hybrid/proportional
+allocators. Verify initial conditions, exogenous schedules and power balance
+before rendering. Plot actual load delivery (including base load and EV once),
+post-commit SOC at interval ends, targets/departures, per-interval unmet kWh,
+battery modes and score_run outcomes. Interval shading uses stairs and actual
+dt_min edges, including the final interval. Catalog scenarios retain their
+configured run length; factory inputs run 288 steps. Agg and finally-close
+keep the CLI headless and release figures even after a save error. No physics,
+policy, data or metrics are changed to improve the visual comparison.
