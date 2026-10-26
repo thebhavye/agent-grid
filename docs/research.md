@@ -130,13 +130,44 @@ Prompts contain compact event facts only; generation stays local.
 python -m edge_llm.benchmark --model /absolute/path/model.gguf
 ```
 
-This reports host, model metadata/quantization, cold load time, advice latency,
+## Local maintenance advisor (#84)
+
+`summarize_faults(records)` groups contiguous device/sensor labels, retaining
+observed/used values and coincident unmet energy. Coincident energy is not a
+causal estimate of fault impact. `FaultAdvisor.advise(event)` always returns
+rules-only guidance when no model is supplied, a load/inference fails, or the
+numeric guard rejects the generated text. Every current fault type has fallback
+advice. Model loading is lazy; importing the package requires no llama.cpp.
+The dashboard's **Advisor** panel labels each event's advice source.
+
+To use a local model, install `requirements-edge.txt`, obtain a GGUF file and set
+`AGENTGRID_GGUF_MODEL=/absolute/path/model.gguf`. One option is
+[Qwen2.5-0.5B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF),
+`qwen2.5-0.5b-instruct-q4_k_m.gguf` (Apache-2.0; verify the model card and licence
+before downloading). Download it manually from that page; no weights are
+committed. On Windows, install the prebuilt CPU wheel rather than compiling:
+
+```sh
+pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+```
+
+`llama-cpp-python` is pinned at 0.3.36 in `requirements-edge.txt`; load results
+and laptop numbers are in the README section. Prompts contain compact event
+facts only; generation stays local.</think><tool_call>edit<arg_key>newString</arg_key><arg_value>This reports host, model metadata/quantization, cold load time, advice latency,
 peak process RSS, output tokens and approximate tokens/s. Tokens/s includes
-prompt processing in the advice interval. Run it on the actual demo laptop:
-this cloud host has no GGUF file and cannot provide that measurement. The
-committed report records **fallback only**, with model and tokens/s null. Real
-model quality and laptop latency/memory remain an explicit acceptance gap for
-#84; the offline fake-model tests are not a substitute.
+prompt processing in the advice interval.
+
+On the demo laptop (Windows 11, i5-1334U, 4 generation threads) the measured
+0.5B Q4_K_M model loaded in 1.1 s, advised at about 19 tokens/s with 543 MiB
+peak process RSS; two of four dashboard fault presets produced accepted local
+advice while the other two fell back after the numeric guard rejected invented
+numeric ranges. See the README "Local fault advisor" section and
+`docs/evaluations/fault-advisor-qwen2.5-0.5b-windows.json`. The earlier
+fallback-only report (`docs/evaluations/fault-advisor.json`) came from this
+cloud host, which has no GGUF file. A larger local candidate (Qwen3-4B-Thinking,
+Q4_K_M Ollama blob) was also measured before being rejected: about 4.8 tokens/s,
+a single advisory burned 1400 tokens in 290 s without producing a final answer,
+and raw 180-token budgeted calls ended in the numeric guard after 60 s.
 
 On Windows, install `requirements-edge.txt` for psutil peak working-set measurement.
 If no peak-memory method is available, the benchmark reports null with a reason.

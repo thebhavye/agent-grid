@@ -780,3 +780,51 @@ research panels off): scenario selection/run 1.339 seconds; cached slider rerun
 0.336 seconds. No exceptions over 864 steps. These measure Python/dashboard
 execution, not browser paint/network or performance on the Windows laptop.
 Recorded in docs/evaluations/dashboard-three-days.json.
+
+### Windows laptop GGUF benchmark for #84 (Qwen2.5-0.5B-Instruct Q4_K_M)
+
+Model: `qwen2.5-0.5b-instruct-q4_k_m.gguf` (Qwen/Qwen2.5-0.5B-Instruct-GGUF,
+Apache-2.0), 491 400 032 bytes, downloaded to `C:\Users\BHAVYE\models` and
+referenced read-only through `AGENTGRID_GGUF_MODEL`; no model files are
+committed (`*.gguf` is gitignored). llama-cpp-python is pinned to 0.3.36 in
+`requirements-edge.txt`, installed from the prebuilt Windows CPU wheel
+(`--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu`); prior
+advice about compiling never applied to this host.
+
+Benchmark on the laptop (Windows 11, i5-1334U, 4 generation threads, n_ctx
+2048, about 1427 MiB free RAM at measurement time): cold load 1.06 s; one
+advice call 2.21 s with 42 output tokens, about 19.0 tokens/s; peak process RSS
+543 MiB (psutil peak_wset; `resource` is unavailable on Windows). Reports live
+in `docs/evaluations/fault-advisor-qwen2.5-0.5b-windows.json` next to the older
+fallback-only `fault-advisor.json`.
+
+Quality check over the dashboard fault presets on `demo_sunny_home`: 2 of 4
+events produced accepted local-model advice (inverter_trip 2.05 s, 19.1
+tokens/s; battery_derate 1.53 s, 24.1 tokens/s) and 2 fell back because the
+numeric guard correctly rejected invented numbers ("80%" charger threshold and
+a "(0-100%)" SOC range that are not in the facts), returning the deterministic
+advice instead. Reviewed output invented no readings beyond those rejected
+ranges and gave no unsafe instructions (no enclosure opening, no isolation
+bypass); battery work is deferred to qualified technicians. `nan`, `stuck`,
+`spike` and `drift` have no dashboard preset and are covered by the fallback
+table plus offline fake-model tests.
+
+A larger local candidate, the `qwen3:4b` Ollama blob (Qwen3-4B-Thinking-2507,
+Q4_K_M, 2.5 GB), was measured on the same host before rejection: about 4.8-5.0
+tokens/s on 4 threads; with a 180-token budget a single advisory took 60.6 s
+and ended in the numeric guard with no final answer, and even a 1400-token
+budget (290.4 s) stayed inside chain-of-thought. The thinking-only variant does
+not honour `/no_think`, so it is unusable for interactive dashboard advice on
+this CPU; a 469 MiB non-thinking model substitutes for it.
+
+The advisor now routes its only real-model call through the model's bundled
+chat template (Qwen2.5-Instruct produces repetitive completion-mode text) and
+strips reasoning tags and bare step numbering before the numeric guard, so
+list markers are not counted as invented readings. Fakes used by the offline
+tests keep the original callable interface unchanged; the full offline suite
+and ruff pass, and default behaviour without `AGENTGRID_GGUF_MODEL` is the
+same rules-only advisor as on main.
+
+Measured limits: this is a 0.5B model giving generic first-step guidance.
+It assists maintenance triage and is not a safety certification; electrical
+and battery work still belongs to qualified technicians.

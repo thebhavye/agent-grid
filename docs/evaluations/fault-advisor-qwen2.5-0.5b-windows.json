@@ -1,0 +1,69 @@
+{
+  "issue": 84,
+  "host": "Windows-11-10.0.26200-SP0",
+  "machine": "AMD64",
+  "cpu": "13th Gen Intel(R) Core(TM) i5-1334U (10 cores, 12 threads)",
+  "n_threads": 4,
+  "n_ctx": 2048,
+  "free_ram_mib_at_measurement": 1427,
+  "llama_cpp_python": "0.3.36",
+  "model": {
+    "name": "qwen2.5-0.5b-instruct",
+    "quantization": "Q4_K_M (GGUF general.file_type 15)",
+    "file_size_bytes": 491400032,
+    "source": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF (qwen2.5-0.5b-instruct-q4_k_m.gguf)",
+    "licence": "Apache-2.0"
+  },
+  "benchmark": {
+    "source": "local_model",
+    "load_seconds": 1.0647718999825884,
+    "advice_seconds": 2.2147032000066247,
+    "peak_rss_mib": 542.54296875,
+    "peak_memory_unavailable_reason": null,
+    "output_tokens": 42,
+    "tokens_per_second": 18.964166394790222
+  },
+  "fault_preset_quality_check": {
+    "scenario": "demo_sunny_home",
+    "accepted_local_model": 2,
+    "fallback": 2,
+    "results": [
+      {
+        "preset": "inverter_trip",
+        "source": "local_model",
+        "seconds": 2.05,
+        "output_tokens": 39,
+        "tokens_per_second": 19.1,
+        "advice": "Check the inverter's temperature and current readings to ensure it is within normal operating limits.\nVerify the inverter's battery capacity and health status to ensure it is not overcharged or undercharged."
+      },
+      {
+        "preset": "charger_fault",
+        "source": "fallback",
+        "seconds": 1.27,
+        "output_tokens": null,
+        "tokens_per_second": null,
+        "advice": "Check the charger status and vehicle connection. Follow the charger reset procedure and arrange service if the fault persists.",
+        "rejection_reason": "invented '80%' battery threshold not present in the facts"
+      },
+      {
+        "preset": "battery_derate",
+        "source": "local_model",
+        "seconds": 1.53,
+        "output_tokens": 37,
+        "tokens_per_second": 24.1,
+        "advice": "Check the battery's capacity and status.\nMonitor the battery's temperature and health indicators.\nInspect the battery's connections and connections to other components.\nPerform a battery health check and diagnostic test."
+      },
+      {
+        "preset": "soc_sensor_dropout",
+        "source": "fallback",
+        "seconds": 1.87,
+        "output_tokens": null,
+        "tokens_per_second": null,
+        "advice": "Check sensor power and communication links. Verify the reading with an independent instrument before relying on it.",
+        "rejection_reason": "invented '(0-100%)' safe range not present in the facts"
+      }
+    ],
+    "safety_review": "No advice invented readings beyond two generic numeric ranges the numeric guard rejected. No unsafe instructions (no enclosure opening, no bypassing isolation); battery work is left to a qualified technician.",
+    "not_measured_fault_types": "nan, stuck, spike, drift are exercised by tests through the fallback table and fake-model injections, not by dashboard fault presets."
+  }
+}
