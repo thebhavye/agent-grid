@@ -560,6 +560,27 @@ Tests compare exact full-day records for both allocators, seeds 1/7/42 and all
 three built-in EV scenarios, plus graph topology, roster changes, reset and faults.
 This wraps the measured #57 trade-offs; it does not claim improved outcomes.
 
+## Issue #61 - Optional grid import and export
+
+GridConfig is off by default. Enabled settlement caps import/export and uses
+validated, full-day tariff bands with exclusive ends and midnight wrapping.
+Prices are non-negative currency-free per-kWh values; examples are explicitly
+synthetic until an owner supplies authoritative residential tariff/export rules.
+Each interval uses its starting band's price, including non-five-minute steps.
+
+After solar/battery allocation, run the same allocator on remaining load demand
+with capped grid import. Do not import into the battery or export battery energy.
+Export only otherwise curtailed solar. The runner checks solar + discharge +
+import = actual load delivery + charge + export + curtailment, and preserves
+the existing SOC checks. Ignore sub-1e-9 numerical residuals only at enabled
+settlement boundaries, not by changing the arbiter or baseline.
+
+Only enabled records gain four settlement fields. Only those runs gain grid
+metrics: import/export energy, net cost and on-site solar use (including storage,
+excluding exports/curtailment). Disabled records and the original metrics remain
+exactly unchanged. Shared runner phases preserve graph parity. This implements
+the exported-surplus revisit from issue #5 without changing off-grid defaults.
+
 ## Issue #66 - Paired closed-loop comparison plots
 
 Use two fresh, equivalent offline twins with unchanged hybrid/proportional
