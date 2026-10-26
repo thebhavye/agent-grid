@@ -1,0 +1,4 @@
+# Optional SHAP surrogate and feature-selection experiments.
+-r requirements.txt
+scikit-learn==1.7.2
+shap==0.49.1

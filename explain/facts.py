@@ -21,7 +21,7 @@ def _flexible_groups(bids, priorities):
 
 
 def build_step_facts(timestamp, available_kw, bids, priorities, allocation,
-                     missed_windows=(), *, strategy="hybrid") -> dict:
+                     missed_windows=(), *, strategy="hybrid", top_factors=None) -> dict:
     """Describe one hybrid or baseline allocation without changing inputs.
 
     The keyword-only strategy selects the actual allocation policy. Missing
@@ -122,6 +122,9 @@ def build_step_facts(timestamp, available_kw, bids, priorities, allocation,
                        "served_fraction": served / demand if demand else 1.0,
                        "priority": priority, "urgency": float(bid["urgency"]),
                        "reason": reason})
-    return {"timestamp": timestamp, "strategy": strategy, "available_kw": available,
+    facts = {"timestamp": timestamp, "strategy": strategy, "available_kw": available,
             "total_demand_kw": math.fsum(demands.values()),
             "curtailed_kw": max(0.0, available - total_allocated), "agents": agents}
+    if top_factors is not None:
+        facts["surrogate_factors"] = [dict(factor) for factor in top_factors]
+    return facts

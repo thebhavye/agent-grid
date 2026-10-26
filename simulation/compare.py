@@ -101,5 +101,35 @@ def results_markdown(frame):
     return "\n".join(lines)
 
 
+def compare_urgency(policy, seeds=(1, 7, 42), scenarios=("clear_day", "monsoon_cloudy", "heatwave")):
+    """Pair an opt-in urgency variant with unchanged hybrid urgency.
+
+    Uses the same fairness checks and outcome scorer as allocator comparisons.
+    Each pair gets fresh twins with identical weather and random schedules.
+    """
+    from scenarios import build_twin
+    rows = []
+    for scenario in scenarios:
+        for seed in seeds:
+            current_twin = build_twin(scenario, closed_loop=True, seed=seed)
+            selected_twin = build_twin(scenario, closed_loop=True, seed=seed)
+            if _initial_conditions(current_twin) != _initial_conditions(selected_twin):
+                raise RuntimeError("paired twins have different initial conditions")
+            current = run_closed_loop(current_twin, hybrid_allocate, collect_features=True)
+            selected = run_closed_loop(selected_twin, hybrid_allocate, collect_features=True,
+                                       urgency_policy=policy)
+            _assert_paired(current, selected)
+            scores = {"current": score_run(current), "selected": score_run(selected)}
+            row = {"scenario": scenario, "seed": seed}
+            for method, values in scores.items():
+                if values["energy_balance_max_error_kw"] >= 1e-6:
+                    raise RuntimeError(f"{method} power balance failed")
+                row.update({f"{method}_{key}": value for key, value in values.items()})
+            row.update({f"delta_{key}": scores["selected"][key] - scores["current"][key]
+                        for key in METRICS})
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
 if __name__ == "__main__":
     print(results_markdown(compare()))

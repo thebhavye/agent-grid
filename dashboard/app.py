@@ -1,6 +1,8 @@
 """AgentGrid dashboard: run with `streamlit run dashboard/app.py`."""
 
 import sys
+import os
+from threading import Lock
 from pathlib import Path
 
 import plotly.graph_objects as go
@@ -35,13 +37,42 @@ st.markdown(
 
 
 @st.cache_data(show_spinner=False)
-def load_run(scenario, strategy, fault, policy):
-    return data.run(data.RunKey(scenario, strategy, fault, policy))
+def load_run(scenario, strategy, fault, policy, battery_health=False):
+    return data.run(data.RunKey(scenario, strategy, fault, policy, battery_health))
+
+
+@st.cache_resource(show_spinner="Fitting offline surrogate…")
+def load_surrogate():
+    from explain.shap_surrogate import evaluate, scenario_frame, train_surrogate
+    model = train_surrogate(scenario_frame())
+    return model, evaluate(model, scenario_frame(("heatwave",), (13,)))
+
+
+@st.cache_resource(show_spinner="Training battery-health model on saved scenarios…")
+def load_health_model():
+    from battery_health.dataset import generate_battery_dataset
+    from battery_health.pinn import daily_frame, train
+    return train(daily_frame(generate_battery_dataset(("demo_sunny_home", "degraded_battery"), 3, 42)))
+
 
 
 @st.cache_data(show_spinner=False)
 def load_comparison(scenario, fault, policy):
     return data.comparison(scenario, fault, policy)
+
+
+@st.cache_resource(show_spinner=False)
+def load_advisor(model_path):
+    from edge_llm import FaultAdvisor
+    return FaultAdvisor(model_path=model_path), Lock()
+
+
+@st.cache_data(show_spinner=False)
+def event_advice(model_path, event):
+    advisor, lock = load_advisor(model_path)
+    with lock:
+        advice = advisor.advise(event)
+        return advice, advisor.last_source
 
 
 def base_layout(fig, title, y_title, height=320):
@@ -161,14 +192,15 @@ with st.sidebar:
         policy = st.radio("Bad sensor reading policy", ["hold_last", "exclude"],
                           format_func={"hold_last": "Hold last good value",
                                        "exclude": "Exclude the agent"}.get)
+    health_enabled = st.checkbox("Battery health experiment", value=False)
     st.divider()
     st.caption("Closed-loop digital twin · offline saved Vellore weather · "
                "every step checked for power balance")
 
 other = "baseline" if strategy == "hybrid" else "hybrid"
 with st.spinner("Running the closed-loop simulation…"):
-    records = load_run(scenario, strategy, fault, policy)
-    other_records = load_run(scenario, other, fault, policy)
+    records = load_run(scenario, strategy, fault, policy, health_enabled)
+    other_records = load_run(scenario, other, fault, policy, health_enabled)
 start_date = CATALOG[scenario]["start_date"]
 frame = data.timeseries(records, start_date)
 groups = data.allocation_groups(records, start_date)
@@ -266,3 +298,70 @@ with faults_tab:
         if subs:
             st.markdown("**Sensor substitutions made by the runner**")
             st.dataframe(subs, hide_index=True, width="stretch")
+
+
+with agents_tab:
+    if strategy == "hybrid" and fault == "none" and st.checkbox("Show optional SHAP surrogate"):
+        try:
+            from explain.shap_surrogate import explain_step as shap_step
+            model, fidelity = load_surrogate()
+            candidates = [name for name, agent in record["agents"].items()
+                          if agent["demand_kw"] > 0 and name != "solar_1"
+                          and (name != "battery_1" or record["mode"] == "charge")]
+            if candidates:
+                selected_agent = st.selectbox("Agent for SHAP", candidates, format_func=data.agent_label)
+                result = shap_step(model, record, selected_agent)
+                st.subheader("Why (SHAP)")
+                factors = result["top_factors"]
+                fig = go.Figure(go.Bar(x=[f["shap_value"] for f in factors],
+                                       y=[f["feature"] for f in factors], orientation="h"))
+                st.plotly_chart(fig, width="stretch")
+                st.caption(f"Hybrid surrogate, heatwave holdout R² {fidelity['r2']:.3f}, "
+                           f"MAE {fidelity['mae']:.3f}. Contributions explain the model prediction, "
+                           "not causal effects.")
+                from explain.render import render_template
+                st.text(render_template({"timestamp": record["timestamp"],
+                                         "available_kw": record["available_kw"],
+                                         "total_demand_kw": sum(record["demand_kw"].values()),
+                                         "curtailed_kw": record["curtailed_kw"],
+                                         "agents": [], "surrogate_factors": factors}))
+            else:
+                st.info("No positive-demand agent at this moment.")
+        except ImportError:
+            st.info("Install requirements-research.txt to enable SHAP explanations.")
+
+with faults_tab:
+    st.subheader("Advisor")
+    from edge_llm import summarize_faults
+    model_path = os.environ.get("AGENTGRID_GGUF_MODEL")
+    advice_events = summarize_faults(records)
+    if not advice_events:
+        st.caption("No labelled fault events in this run.")
+    for event in advice_events:
+        advice, source = event_advice(model_path, event)
+        st.markdown(f"**{event['fault_type']} · {event['device']} · "
+                    f"steps {event['start_step']}–{event['end_step']} (end exclusive)**")
+        st.write(advice)
+        st.caption(f"Source: {source}. Coincident unmet energy "
+                   f"{event['coincident_unmet_kwh']:.3f} kWh; this is not causal fault impact.")
+
+with overview:
+    if health_enabled:
+        st.subheader("Battery health")
+        try:
+            import pandas as pd
+            from battery_health.pinn import daily_frame, thermal_risk
+            battery_frame = daily_frame(data.battery_steps(records, scenario, seed=CATALOG[scenario]["appliance_seed"]))
+            prediction = load_health_model().predict(battery_frame)
+            st.line_chart(pd.DataFrame({"Predicted day-end SoH (%)": prediction[:, 0],
+                                       "Twin day-end SoH (%)": battery_frame.end_health_pct}))
+            st.line_chart(pd.DataFrame({"Predicted daily peak (°C)": prediction[:, 1],
+                                       "Twin daily peak (°C)": battery_frame.peak_temperature_c}))
+            selected_day = min(int(frame.minute.iloc[step] // 1440), len(prediction) - 1)
+            peak = prediction[selected_day, 1]
+            flags = thermal_risk(peak, peak, 1440)
+            st.write("Predicted daily peak risk: " + (", ".join(flags) if flags else "none"))
+            st.caption("Conditional daily fits on the selected run's operating exposures; "
+                       "not forecasts of unknown usage or validated battery diagnostics.")
+        except ImportError:
+            st.info("Install requirements-battery.txt for battery-health predictions.")

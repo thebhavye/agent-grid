@@ -1,6 +1,10 @@
-"""Offline template renderer. External disclosure has not been approved."""
+"""Facts-only rendering; external clients require explicit opt-in."""
 
+import json
 import logging
+import os
+
+from explain.numbers import numbers_supported
 
 logger = logging.getLogger(__name__)
 
@@ -22,15 +26,33 @@ def render_template(facts) -> str:
     for agent in facts["agents"]:
         lines.append(f"{agent['agent_id']}: {agent['allocated_kw']:.6f} of "
                      f"{agent['demand_kw']:.6f} kW served; {_REASONS[agent['reason']]}.")
+    for factor in facts.get("surrogate_factors", []):
+        lines.append(f"Surrogate factor: {factor['feature']} = {factor['value']:.6f}; "
+                     f"contribution {factor['shap_value']:.6f} to predicted served fraction.")
     return "\n".join(lines)
 
 
-def render_llm(facts, client=None) -> str:
-    """Return the template while external disclosure awaits owner approval.
+def render_llm(facts, client=None, *, enabled=False, model=None) -> str:
+    """Use an injected ``client(prompt, model=...)`` only when enabled.
 
-    No client is invoked, even when provided. Enabling an external renderer
-    requires a separate privacy decision and numeric-claim validation at
-    the template's six-decimal precision before returning generated text.
+    No SDK, credentials or remote endpoint is selected implicitly. The caller
+    must explicitly approve disclosure with enabled=True and supply a client.
+    Model configuration comes from the argument or AGENTGRID_EXPLAIN_MODEL.
+    Exceptions and unsupported numeric claims fall back to the offline text.
     """
-    logger.warning("External LLM rendering is disabled pending owner privacy approval")
-    return render_template(facts)
+    if not enabled:
+        logger.warning("External LLM rendering is disabled pending owner privacy approval")
+        return render_template(facts)
+    try:
+        if client is None:
+            raise ValueError("an explicit client is required")
+        prompt = ("Explain only these computed allocation facts in two to four sentences. "
+                  "Do not infer readings or causes. Use no numbers absent from the JSON.\n"
+                  + json.dumps(facts, sort_keys=True, default=str))
+        text = client(prompt, model=model or os.environ.get("AGENTGRID_EXPLAIN_MODEL"))
+        if not numbers_supported(text, facts):
+            raise ValueError("unsupported numeric claim or empty response")
+        return text
+    except Exception as exc:
+        logger.warning("LLM explanation rejected (%s); using template", type(exc).__name__)
+        return render_template(facts)

@@ -912,6 +912,9 @@ def run_closed_loop(
     sensor_faults=None,
     device_faults=None,
     grid_config=None,
+    *,
+    collect_features=False,
+    urgency_policy=None,
 ) -> list[dict]:
     """Run an allocator against a fresh closed-loop digital twin.
 
@@ -957,10 +960,33 @@ def run_closed_loop(
         sensor_faults, device_faults, grid_config,
     )
     records = []
+    recent_unmet = {}
     for step in range(steps):
         data = _prepare_step(context, step)
         bids = _bids_for_observation(context["agents"], data["sanitized"], data["excluded"])
         _select_battery_mode(context, data, bids)
+        features = None
+        if collect_features or urgency_policy is not None:
+            from explain.features import decision_features
+            features = decision_features(context, data, recent_unmet)
+            if urgency_policy is not None:
+                for bid in data["allocator_bids"]:
+                    value = float(urgency_policy(bid["agent_id"], features[bid["agent_id"]]))
+                    if not math.isfinite(value) or not 0 <= value <= 1:
+                        raise ValueError("urgency_policy must return a finite value in [0, 1]")
+                    bid["urgency"] = value
+                    features[bid["agent_id"]]["urgency"] = value
+                for bid in data["bids"]:
+                    if bid["agent_id"] in features:
+                        bid["urgency"] = features[bid["agent_id"]]["urgency"]
         _allocate_step(context, data)
-        records.append(_commit_step(context, data))
+        record = _commit_step(context, data)
+        if features is not None:
+            record["decision_features"] = features
+            # One-hour exponential history, updated only after the decision.
+            for name, agent in record["agents"].items():
+                recent_unmet[name] = (recent_unmet.get(name, 0) * math.exp(-record["dt_min"] / 60)
+                                      + max(0, agent["demand_kw"] - agent["allocated_kw"])
+                                      * record["dt_min"] / 60)
+        records.append(record)
     return records

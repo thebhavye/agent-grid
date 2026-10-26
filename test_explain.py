@@ -222,3 +222,34 @@ def test_complete_generated_day_matches_actual_allocation(strategy):
             assert agent["agent_id"] in render_template(facts)
             if strategy == "baseline" and 0 < agent["demand_kw"] and agent["served_fraction"] < 1:
                 assert agent["reason"] == "shared_proportionally"
+
+
+@pytest.mark.parametrize("response,accepted", [("a received 0.500000 kW", True),
+                                               ("a received 999 kW", False),
+                                               ("a received 5e-1 kW", True),
+                                               ("a received 0.500001 kW", False),
+                                               ("", False), (None, False)])
+def test_opt_in_renderer_numeric_guard(response, accepted):
+    facts = facts_for([bid("a")], .5)
+    client = Mock(return_value=response)
+    result = render_llm(facts, client, enabled=True, model="test-model")
+    assert result == (response if accepted else render_template(facts))
+    prompt = client.call_args.args[0]
+    assert '"allocated_kw": 0.5' in prompt
+    assert client.call_args.kwargs["model"] == "test-model"
+
+
+def test_opt_in_renderer_exception_and_missing_client(caplog):
+    facts = facts_for([bid("a")], .5)
+    client = Mock(side_effect=RuntimeError("private provider message"))
+    assert render_llm(facts, client, enabled=True) == render_template(facts)
+    assert render_llm(facts, enabled=True) == render_template(facts)
+    assert "private provider message" not in caplog.text
+
+
+def test_surrogate_factors_are_optional_facts():
+    bids = [bid("a")]
+    factors = [{"feature": "urgency", "value": 0., "shap_value": -.2}]
+    facts = build_step_facts("12:00", .5, bids, {}, {"a": .5}, top_factors=factors)
+    assert facts["surrogate_factors"] == factors
+    assert "Surrogate factor: urgency" in render_template(facts)

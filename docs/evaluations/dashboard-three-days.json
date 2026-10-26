@@ -1,0 +1,8 @@
+{
+  "scenario": "three_days",
+  "steps": 864,
+  "scope": "Streamlit AppTest, cloud Linux host; browser paint/network not measured",
+  "scenario_load_seconds": 1.3386162739999463,
+  "cached_slider_rerun_seconds": 0.33609960300009334,
+  "research_panels_enabled": false
+}
